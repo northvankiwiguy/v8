@@ -128,6 +128,36 @@ BUILTIN(StringPrototypeLastIndexOf) {
                              args.atOrUndefined(isolate, 2));
 }
 
+/* Peter's added C++ version of string reverse */
+// String.prototype.reverse1()
+BUILTIN(StringPrototypeReverse1) {
+  HandleScope scope(isolate);
+
+  // TODO: move this code into the string class? Maybe, but not sure what the difference is.
+  // TODO: add tests
+  Handle<String> string;
+  // TODO: This is a String method - in what cases can the receiver not be converted to a string?
+  // TODO: use ASSIGN_RETURN_* macro here?
+  if (!Object::ToString(isolate, args.receiver()).ToHandle(&string)) {
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
+  int32_t length = string->length();
+  if (length == 0) {
+    return *(isolate->factory()->empty_string());
+  }
+
+  Handle<SeqTwoByteString> result_string;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result_string,
+      isolate->factory()->NewRawTwoByteString(length));
+
+  for (int32_t index = 0; index != length; index++){
+    result_string->Set(index, string->Get(length-index-1));
+  }
+
+  return *result_string;
+}
+
 // ES6 section 21.1.3.10 String.prototype.localeCompare ( that )
 //
 // This function is implementation specific.  For now, we do not

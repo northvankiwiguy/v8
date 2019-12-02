@@ -2060,6 +2060,11 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
                           Builtins::kStringPrototypeRepeat, 1, true);
     SimpleInstallFunction(isolate_, prototype, "replace",
                           Builtins::kStringPrototypeReplace, 2, true);
+
+    /* Peter's added functions for reversing strings in various ways */
+    SimpleInstallFunction(isolate_, prototype, "reverse1",
+                          Builtins::kStringPrototypeReverse1, 0, false);
+
     SimpleInstallFunction(isolate_, prototype, "search",
                           Builtins::kStringPrototypeSearch, 1, true);
     SimpleInstallFunction(isolate_, prototype, "slice",

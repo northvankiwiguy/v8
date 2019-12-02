@@ -887,6 +887,8 @@ namespace internal {
   CPP(StringPrototypeLocaleCompare)                                            \
   /* ES6 #sec-string.prototype.replace */                                      \
   TFJ(StringPrototypeReplace, 2, kReceiver, kSearch, kReplace)                 \
+  /* Peter's own implementation of reverse() for string objects */             \
+  CPP(StringPrototypeReverse1)                                                 \
   /* ES6 #sec-string.prototype.search */                                       \
   TFJ(StringPrototypeSearch, 1, kReceiver, kRegexp)                            \
   /* ES6 #sec-string.prototype.split */                                        \
