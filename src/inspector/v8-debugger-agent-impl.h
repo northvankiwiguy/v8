@@ -93,14 +93,17 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
           newCallFrames,
       Maybe<protocol::Runtime::StackTrace>* asyncStackTrace,
       Maybe<protocol::Runtime::StackTraceId>* asyncStackTraceId) override;
-  Response getScriptSource(const String16& scriptId,
-                           String16* scriptSource) override;
+  Response getScriptSource(const String16& scriptId, String16* scriptSource,
+                           Maybe<protocol::Binary>* bytecode) override;
   Response getWasmBytecode(const String16& scriptId,
                            protocol::Binary* bytecode) override;
   Response pause() override;
-  Response resume() override;
-  Response stepOver() override;
-  Response stepInto(Maybe<bool> inBreakOnAsyncCall) override;
+  Response resume(Maybe<bool> terminateOnResume) override;
+  Response stepOver(Maybe<protocol::Array<protocol::Debugger::LocationRange>>
+                        inSkipList) override;
+  Response stepInto(Maybe<bool> inBreakOnAsyncCall,
+                    Maybe<protocol::Array<protocol::Debugger::LocationRange>>
+                        inSkipList) override;
   Response stepOut() override;
   Response pauseOnAsyncCall(std::unique_ptr<protocol::Runtime::StackTraceId>
                                 inParentStackTraceId) override;
@@ -113,6 +116,11 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
       Maybe<double> timeout,
       std::unique_ptr<protocol::Runtime::RemoteObject>* result,
       Maybe<protocol::Runtime::ExceptionDetails>*) override;
+  Response executeWasmEvaluator(
+      const String16& callFrameId, const protocol::Binary& evaluator,
+      Maybe<double> timeout,
+      std::unique_ptr<protocol::Runtime::RemoteObject>* result,
+      Maybe<protocol::Runtime::ExceptionDetails>* exceptionDetails) override;
   Response setVariableValue(
       int scopeNumber, const String16& variableName,
       std::unique_ptr<protocol::Runtime::CallArgument> newValue,
@@ -154,6 +162,7 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
   bool isFunctionBlackboxed(const String16& scriptId,
                             const v8::debug::Location& start,
                             const v8::debug::Location& end);
+  bool shouldBeSkipped(const String16& scriptId, int line, int column);
 
   bool acceptsPause(bool isOOMBreak) const;
 
@@ -177,7 +186,8 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
   void setBreakpointImpl(const String16& breakpointId,
                          v8::Local<v8::Function> function,
                          v8::Local<v8::String> condition);
-  void removeBreakpointImpl(const String16& breakpointId);
+  void removeBreakpointImpl(const String16& breakpointId,
+                            const std::vector<V8DebuggerScript*>& scripts);
   void clearBreakDetails();
 
   void internalSetAsyncCallStackDepth(int);
@@ -189,6 +199,9 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
   bool isPaused() const;
 
   void setScriptInstrumentationBreakpointIfNeeded(V8DebuggerScript* script);
+
+  Response processSkipList(
+      protocol::Array<protocol::Debugger::LocationRange>* skipList);
 
   using ScriptsMap =
       std::unordered_map<String16, std::unique_ptr<V8DebuggerScript>>;
@@ -230,6 +243,7 @@ class V8DebuggerAgentImpl : public protocol::Debugger::Backend {
   std::unique_ptr<V8Regex> m_blackboxPattern;
   std::unordered_map<String16, std::vector<std::pair<int, int>>>
       m_blackboxedPositions;
+  std::unordered_map<String16, std::vector<std::pair<int, int>>> m_skipList;
 
   DISALLOW_COPY_AND_ASSIGN(V8DebuggerAgentImpl);
 };

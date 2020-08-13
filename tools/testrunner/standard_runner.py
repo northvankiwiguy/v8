@@ -5,6 +5,7 @@
 # found in the LICENSE file.
 
 # for py2/py3 compatibility
+from __future__ import absolute_import
 from __future__ import print_function
 from functools import reduce
 
@@ -15,7 +16,7 @@ import sys
 import tempfile
 
 # Adds testrunner to the path hence it has to be imported at the beggining.
-import base_runner
+from . import base_runner
 
 from testrunner.local import utils
 from testrunner.local.variants import ALL_VARIANTS
@@ -46,8 +47,12 @@ VARIANT_ALIASES = {
   # Shortcut for the two above ('more' first - it has the longer running tests)
   'exhaustive': MORE_VARIANTS + VARIANTS,
   # Additional variants, run on a subset of bots.
-  'extra': ['nooptimization', 'future', 'no_wasm_traps', 'turboprop'],
+  'extra': ['nooptimization', 'future', 'no_wasm_traps', 'turboprop',
+            'instruction_scheduling'],
 }
+
+# Extra flags passed to all tests using the standard test runner.
+EXTRA_DEFAULT_FLAGS = ['--testing-d8-test-runner']
 
 GC_STRESS_FLAGS = ['--gc-interval=500', '--stress-compaction',
                    '--concurrent-recompilation-queue-length=64',
@@ -238,6 +243,9 @@ class StandardTestRunner(base_runner.BaseTestRunner):
           prefix="v8-test-runner-")
       options.json_test_results = self._temporary_json_output_file.name
 
+  def _runner_flags(self):
+    return EXTRA_DEFAULT_FLAGS
+
   def _parse_variants(self, aliases_str):
     # Use developer defaults if no variant was specified.
     aliases_str = aliases_str or 'dev'
@@ -252,6 +260,8 @@ class StandardTestRunner(base_runner.BaseTestRunner):
     for v in user_variants:
       if v not in ALL_VARIANTS:
         print('Unknown variant: %s' % v)
+        print('    Available variants: %s' % ALL_VARIANTS)
+        print('    Available variant aliases: %s' % VARIANT_ALIASES.keys());
         raise base_runner.TestRunnerError()
     assert False, 'Unreachable'
 

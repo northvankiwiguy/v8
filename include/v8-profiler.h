@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "v8.h"  // NOLINT(build/include)
+#include "v8.h"  // NOLINT(build/include_directory)
 
 /**
  * Profiler support for the V8 JavaScript engine.
@@ -143,10 +143,6 @@ class V8_EXPORT CpuProfileNode {
     * Returns the count of samples where the function was currently executing.
     */
   unsigned GetHitCount() const;
-
-  /** Returns function entry UID. */
-  V8_DEPRECATED("Use GetScriptId, GetLineNumber, and GetColumnNumber instead.")
-  unsigned GetCallUid() const;
 
   /** Returns id of the node. The id is unique within the tree */
   unsigned GetNodeId() const;
@@ -848,7 +844,8 @@ class V8_EXPORT HeapProfiler {
    */
   const HeapSnapshot* TakeHeapSnapshot(
       ActivityControl* control = nullptr,
-      ObjectNameResolver* global_object_name_resolver = nullptr);
+      ObjectNameResolver* global_object_name_resolver = nullptr,
+      bool treat_global_objects_as_roots = true);
 
   /**
    * Starts tracking of heap objects population statistics. After calling

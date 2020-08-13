@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_SHARED_FUNCTION_INFO_INL_H_
 #define V8_OBJECTS_SHARED_FUNCTION_INFO_INL_H_
 
+#include "src/base/macros.h"
 #include "src/objects/shared-function-info.h"
 
 #include "src/handles/handles-inl.h"
@@ -84,11 +85,6 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithoutPreparseData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithPreparseData)
 
-DEF_GETTER(HeapObject, IsUncompiledData, bool) {
-  return IsUncompiledDataWithoutPreparseData(isolate) ||
-         IsUncompiledDataWithPreparseData(isolate);
-}
-
 OBJECT_CONSTRUCTORS_IMPL(InterpreterData, Struct)
 
 CAST_ACCESSOR(InterpreterData)
@@ -101,6 +97,8 @@ NEVER_READ_ONLY_SPACE_IMPL(SharedFunctionInfo)
 CAST_ACCESSOR(SharedFunctionInfo)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(SharedFunctionInfo, Object)
 
+SYNCHRONIZED_ACCESSORS(SharedFunctionInfo, function_data, Object,
+                       kFunctionDataOffset)
 ACCESSORS(SharedFunctionInfo, name_or_scope_info, Object,
           kNameOrScopeInfoOffset)
 ACCESSORS(SharedFunctionInfo, script_or_debug_info, HeapObject,
@@ -115,11 +113,12 @@ INT_ACCESSORS(SharedFunctionInfo, unique_id, kUniqueIdOffset)
 UINT16_ACCESSORS(SharedFunctionInfo, length, kLengthOffset)
 UINT16_ACCESSORS(SharedFunctionInfo, internal_formal_parameter_count,
                  kFormalParameterCountOffset)
-UINT16_ACCESSORS(SharedFunctionInfo, expected_nof_properties,
-                 kExpectedNofPropertiesOffset)
+UINT8_ACCESSORS(SharedFunctionInfo, expected_nof_properties,
+                kExpectedNofPropertiesOffset)
 UINT16_ACCESSORS(SharedFunctionInfo, raw_function_token_offset,
                  kFunctionTokenOffsetOffset)
 RELAXED_INT32_ACCESSORS(SharedFunctionInfo, flags, kFlagsOffset)
+UINT8_ACCESSORS(SharedFunctionInfo, flags2, kFlags2Offset)
 
 bool SharedFunctionInfo::HasSharedName() const {
   Object value = name_or_scope_info();
@@ -153,21 +152,22 @@ void SharedFunctionInfo::SetName(String name) {
   UpdateFunctionMapIndex();
 }
 
+bool SharedFunctionInfo::is_script() const {
+  return scope_info().is_script_scope() &&
+         Script::cast(script()).compilation_type() ==
+             Script::COMPILATION_TYPE_HOST;
+}
+
+bool SharedFunctionInfo::needs_script_context() const {
+  return is_script() && scope_info().ContextLocalCount() > 0;
+}
+
 AbstractCode SharedFunctionInfo::abstract_code() {
   if (HasBytecodeArray()) {
     return AbstractCode::cast(GetBytecodeArray());
   } else {
     return AbstractCode::cast(GetCode());
   }
-}
-
-Object SharedFunctionInfo::function_data() const {
-  return ACQUIRE_READ_FIELD(*this, kFunctionDataOffset);
-}
-
-void SharedFunctionInfo::set_function_data(Object data, WriteBarrierMode mode) {
-  RELEASE_WRITE_FIELD(*this, kFunctionDataOffset, data);
-  CONDITIONAL_WRITE_BARRIER(*this, kFunctionDataOffset, data, mode);
 }
 
 int SharedFunctionInfo::function_token_position() const {
@@ -178,6 +178,16 @@ int SharedFunctionInfo::function_token_position() const {
     return StartPosition() - offset;
   }
 }
+
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, class_scope_has_private_brand,
+                    SharedFunctionInfo::ClassScopeHasPrivateBrandBit)
+
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2,
+                    has_static_private_methods_or_accessors,
+                    SharedFunctionInfo::HasStaticPrivateMethodsOrAccessorsBit)
+
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, may_have_cached_code,
+                    SharedFunctionInfo::MayHaveCachedCodeBit)
 
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags, syntax_kind,
                     SharedFunctionInfo::FunctionSyntaxKindBits)
@@ -193,7 +203,7 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags, is_asm_wasm_broken,
                     SharedFunctionInfo::IsAsmWasmBrokenBit)
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags,
                     requires_instance_members_initializer,
-                    SharedFunctionInfo::RequiresInstanceMembersInitializer)
+                    SharedFunctionInfo::RequiresInstanceMembersInitializerBit)
 
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags, name_should_print_as_anonymous,
                     SharedFunctionInfo::NameShouldPrintAsAnonymousBit)
@@ -204,7 +214,7 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags, is_toplevel,
                     SharedFunctionInfo::IsTopLevelBit)
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags,
                     is_oneshot_iife_or_properties_are_final,
-                    SharedFunctionInfo::IsOneshotIIFEOrPropertiesAreFinalBit)
+                    SharedFunctionInfo::IsOneshotIifeOrPropertiesAreFinalBit)
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags,
                     is_safe_to_skip_arguments_adaptor,
                     SharedFunctionInfo::IsSafeToSkipArgumentsAdaptorBit)
@@ -237,6 +247,7 @@ void SharedFunctionInfo::set_language_mode(LanguageMode language_mode) {
 }
 
 FunctionKind SharedFunctionInfo::kind() const {
+  STATIC_ASSERT(FunctionKindBits::kSize == kFunctionKindBitSize);
   return FunctionKindBits::decode(flags());
 }
 
@@ -324,7 +335,7 @@ ScopeInfo SharedFunctionInfo::scope_info() const {
   if (maybe_scope_info.IsScopeInfo()) {
     return ScopeInfo::cast(maybe_scope_info);
   }
-  return ScopeInfo::Empty(GetIsolate());
+  return GetReadOnlyRoots().empty_scope_info();
 }
 
 void SharedFunctionInfo::set_scope_info(ScopeInfo scope_info,
@@ -406,12 +417,15 @@ bool SharedFunctionInfo::is_compiled() const {
          !data.IsUncompiledData();
 }
 
-IsCompiledScope SharedFunctionInfo::is_compiled_scope() const {
-  return IsCompiledScope(*this, GetIsolate());
+template <typename LocalIsolate>
+IsCompiledScope SharedFunctionInfo::is_compiled_scope(
+    LocalIsolate* isolate) const {
+  return IsCompiledScope(*this, isolate);
 }
 
+template <typename LocalIsolate>
 IsCompiledScope::IsCompiledScope(const SharedFunctionInfo shared,
-                                 Isolate* isolate)
+                                 LocalIsolate* isolate)
     : retain_bytecode_(shared.HasBytecodeArray()
                            ? handle(shared.GetBytecodeArray(), isolate)
                            : MaybeHandle<BytecodeArray>()),
@@ -427,7 +441,7 @@ bool SharedFunctionInfo::IsApiFunction() const {
   return function_data().IsFunctionTemplateInfo();
 }
 
-FunctionTemplateInfo SharedFunctionInfo::get_api_func_data() {
+FunctionTemplateInfo SharedFunctionInfo::get_api_func_data() const {
   DCHECK(IsApiFunction());
   return FunctionTemplateInfo::cast(function_data());
 }
@@ -614,30 +628,33 @@ void SharedFunctionInfo::ClearPreparseData() {
   DCHECK(HasUncompiledDataWithoutPreparseData());
 }
 
-// static
-void UncompiledData::Initialize(
-    UncompiledData data, String inferred_name, int start_position,
-    int end_position,
-    std::function<void(HeapObject object, ObjectSlot slot, HeapObject target)>
-        gc_notify_updated_slot) {
-  data.set_inferred_name(inferred_name);
-  gc_notify_updated_slot(
-      data, data.RawField(UncompiledData::kInferredNameOffset), inferred_name);
-  data.set_start_position(start_position);
-  data.set_end_position(end_position);
+template <typename LocalIsolate>
+void UncompiledData::Init(LocalIsolate* isolate, String inferred_name,
+                          int start_position, int end_position) {
+  set_inferred_name(inferred_name);
+  set_start_position(start_position);
+  set_end_position(end_position);
 }
 
-void UncompiledDataWithPreparseData::Initialize(
-    UncompiledDataWithPreparseData data, String inferred_name,
-    int start_position, int end_position, PreparseData scope_data,
+void UncompiledData::InitAfterBytecodeFlush(
+    String inferred_name, int start_position, int end_position,
     std::function<void(HeapObject object, ObjectSlot slot, HeapObject target)>
         gc_notify_updated_slot) {
-  UncompiledData::Initialize(data, inferred_name, start_position, end_position,
-                             gc_notify_updated_slot);
-  data.set_preparse_data(scope_data);
-  gc_notify_updated_slot(
-      data, data.RawField(UncompiledDataWithPreparseData::kPreparseDataOffset),
-      scope_data);
+  set_inferred_name(inferred_name);
+  gc_notify_updated_slot(*this, RawField(UncompiledData::kInferredNameOffset),
+                         inferred_name);
+  set_start_position(start_position);
+  set_end_position(end_position);
+}
+
+template <typename LocalIsolate>
+void UncompiledDataWithPreparseData::Init(LocalIsolate* isolate,
+                                          String inferred_name,
+                                          int start_position, int end_position,
+                                          PreparseData scope_data) {
+  this->UncompiledData::Init(isolate, inferred_name, start_position,
+                             end_position);
+  set_preparse_data(scope_data);
 }
 
 bool SharedFunctionInfo::HasWasmExportedFunctionData() const {
@@ -667,6 +684,10 @@ void SharedFunctionInfo::set_script(HeapObject script) {
   } else {
     set_script_or_debug_info(script);
   }
+}
+
+bool SharedFunctionInfo::is_repl_mode() const {
+  return script().IsScript() && Script::cast(script()).is_repl_mode();
 }
 
 bool SharedFunctionInfo::HasDebugInfo() const {

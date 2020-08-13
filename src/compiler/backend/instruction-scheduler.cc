@@ -5,8 +5,8 @@
 #include "src/compiler/backend/instruction-scheduler.h"
 
 #include "src/base/iterator.h"
+#include "src/base/optional.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/execution/isolate.h"
 
 namespace v8 {
 namespace internal {
@@ -50,7 +50,7 @@ InstructionScheduler::StressSchedulerQueue::PopBestCandidate(int cycle) {
   DCHECK(!IsEmpty());
   // Choose a random element from the ready list.
   auto candidate = nodes_.begin();
-  std::advance(candidate, isolate()->random_number_generator()->NextInt(
+  std::advance(candidate, random_number_generator()->NextInt(
                               static_cast<int>(nodes_.size())));
   ScheduleGraphNode* result = *candidate;
   nodes_.erase(candidate);
@@ -81,7 +81,12 @@ InstructionScheduler::InstructionScheduler(Zone* zone,
       pending_loads_(zone),
       last_live_in_reg_marker_(nullptr),
       last_deopt_or_trap_(nullptr),
-      operands_map_(zone) {}
+      operands_map_(zone) {
+  if (FLAG_turbo_stress_instruction_scheduling) {
+    random_number_generator_ =
+        base::Optional<base::RandomNumberGenerator>(FLAG_random_seed);
+  }
+}
 
 void InstructionScheduler::StartBlock(RpoNumber rpo) {
   DCHECK(graph_.empty());
@@ -103,7 +108,7 @@ void InstructionScheduler::EndBlock(RpoNumber rpo) {
 }
 
 void InstructionScheduler::AddTerminator(Instruction* instr) {
-  ScheduleGraphNode* new_node = new (zone()) ScheduleGraphNode(zone(), instr);
+  ScheduleGraphNode* new_node = zone()->New<ScheduleGraphNode>(zone(), instr);
   // Make sure that basic block terminators are not moved by adding them
   // as successor of every instruction.
   for (ScheduleGraphNode* node : graph_) {
@@ -123,7 +128,7 @@ void InstructionScheduler::AddInstruction(Instruction* instr) {
     return;
   }
 
-  ScheduleGraphNode* new_node = new (zone()) ScheduleGraphNode(zone(), instr);
+  ScheduleGraphNode* new_node = zone()->New<ScheduleGraphNode>(zone(), instr);
 
   // We should not have branches in the middle of a block.
   DCHECK_NE(instr->flags_mode(), kFlags_branch);
@@ -248,6 +253,7 @@ void InstructionScheduler::Schedule() {
 int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
   switch (instr->arch_opcode()) {
     case kArchNop:
+    case kArchStackCheckOffset:
     case kArchFramePointer:
     case kArchParentFramePointer:
     case kArchStackSlot:  // Despite its name this opcode will produce a
@@ -257,7 +263,6 @@ int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
     case kArchDeoptimize:
     case kArchJmp:
     case kArchBinarySearchSwitch:
-    case kArchLookupSwitch:
     case kArchRet:
     case kArchTableSwitch:
     case kArchThrowTerminator:
@@ -305,8 +310,10 @@ int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
     case kArchTailCallAddress:
     case kArchTailCallWasm:
     case kArchAbortCSAAssert:
-    case kArchDebugBreak:
       return kHasSideEffect;
+
+    case kArchDebugBreak:
+      return kIsBarrier;
 
     case kArchSaveCallerRegisters:
     case kArchRestoreCallerRegisters:

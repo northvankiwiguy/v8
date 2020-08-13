@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/compiler/backend/code-generator.h"
-
 #include "src/base/overflowing-math.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/callable.h"
@@ -11,12 +9,13 @@
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/code-generator-impl.h"
+#include "src/compiler/backend/code-generator.h"
 #include "src/compiler/backend/gap-resolver.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
 #include "src/execution/frame-constants.h"
 #include "src/execution/frames.h"
-#include "src/heap/heap-inl.h"  // crbug.com/v8/8499
+#include "src/heap/memory-chunk.h"
 #include "src/objects/smi.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-objects.h"
@@ -321,7 +320,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       // Just encode the stub index. This will be patched when the code
       // is added to the native module and copied into wasm code space.
       __ CallRecordWriteStub(object_, scratch1_, remembered_set_action,
-                             save_fp_mode, wasm::WasmCode::kWasmRecordWrite);
+                             save_fp_mode, wasm::WasmCode::kRecordWrite);
     } else {
       __ CallRecordWriteStub(object_, scratch1_, remembered_set_action,
                              save_fp_mode);
@@ -493,6 +492,23 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     __ cmov(zero, dst, tmp);                         \
   } while (false)
 
+#define ASSEMBLE_SIMD_SHIFT(opcode, width)             \
+  do {                                                 \
+    XMMRegister dst = i.OutputSimd128Register();       \
+    DCHECK_EQ(dst, i.InputSimd128Register(0));         \
+    if (HasImmediateInput(instr, 1)) {                 \
+      __ opcode(dst, dst, byte{i.InputInt##width(1)}); \
+    } else {                                           \
+      XMMRegister tmp = i.TempSimd128Register(0);      \
+      Register tmp_shift = i.TempRegister(1);          \
+      constexpr int mask = (1 << width) - 1;           \
+      __ mov(tmp_shift, i.InputRegister(1));           \
+      __ and_(tmp_shift, Immediate(mask));             \
+      __ Movd(tmp, tmp_shift);                         \
+      __ opcode(dst, dst, tmp);                        \
+    }                                                  \
+  } while (false)
+
 void CodeGenerator::AssembleDeconstructFrame() {
   __ mov(esp, ebp);
   __ pop(ebp);
@@ -533,9 +549,8 @@ void CodeGenerator::AssemblePopArgumentsAdaptorFrame(Register args_reg,
          Operand(ebp, ArgumentsAdaptorFrameConstants::kLengthOffset));
   __ SmiUntag(caller_args_count_reg);
 
-  ParameterCount callee_args_count(args_reg);
-  __ PrepareForTailCall(callee_args_count, caller_args_count_reg, scratch2,
-                        scratch3, scratch_count);
+  __ PrepareForTailCall(args_reg, caller_args_count_reg, scratch2, scratch3,
+                        scratch_count);
   __ pop(scratch3);
   __ pop(scratch2);
   __ pop(scratch1);
@@ -564,12 +579,19 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
 #ifdef DEBUG
 bool VerifyOutputOfAtomicPairInstr(IA32OperandConverter* converter,
                                    const Instruction* instr) {
-  if (instr->OutputCount() > 0) {
-    if (converter->OutputRegister(0) != eax) return false;
-    if (instr->OutputCount() == 2 && converter->OutputRegister(1) != edx)
-      return false;
+  if (instr->OutputCount() == 2) {
+    return (converter->OutputRegister(0) == eax &&
+            converter->OutputRegister(1) == edx);
   }
-  return true;
+  if (instr->OutputCount() == 1) {
+    return (converter->OutputRegister(0) == eax &&
+            converter->TempRegister(0) == edx) ||
+           (converter->OutputRegister(0) == edx &&
+            converter->TempRegister(0) == eax);
+  }
+  DCHECK_EQ(instr->OutputCount(), 0);
+  return (converter->TempRegister(0) == eax &&
+          converter->TempRegister(1) == edx);
 }
 #endif
 
@@ -642,7 +664,7 @@ void CodeGenerator::BailoutIfDeoptimized() {
   __ pop(eax);  // Restore eax.
 
   Label skip;
-  __ j(zero, &skip);
+  __ j(zero, &skip, Label::kNear);
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET);
   __ bind(&skip);
@@ -670,7 +692,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (op->IsImmediate()) {
         Handle<Code> code = i.InputCode(0);
         __ Call(code, RelocInfo::CODE_TARGET);
-      } else if (op->IsRegister()) {
+      } else {
         Register reg = i.InputRegister(0);
         DCHECK_IMPLIES(
             HasCallDescriptorFlag(instr, CallDescriptor::kFixedTargetRegister),
@@ -681,23 +703,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         } else {
           __ call(reg);
         }
-      } else {
-        CHECK(tasm()->root_array_available());
-        // This is used to allow calls to the arguments adaptor trampoline from
-        // code that only has 5 gp registers available and cannot call through
-        // an immediate. This happens when the arguments adaptor trampoline is
-        // not an embedded builtin.
-        // TODO(v8:6666): Remove once only embedded builtins are supported.
-        __ push(eax);
-        frame_access_state()->IncreaseSPDelta(1);
-        Operand virtual_call_target_register(
-            kRootRegister, IsolateData::virtual_call_target_register_offset());
-        __ mov(eax, i.InputOperand(0));
-        __ LoadCodeObjectEntry(eax, eax);
-        __ mov(virtual_call_target_register, eax);
-        __ pop(eax);
-        frame_access_state()->IncreaseSPDelta(-1);
-        __ call(virtual_call_target_register);
       }
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
@@ -866,7 +871,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ CallCFunction(func, num_parameters);
       }
       __ bind(&return_location);
-      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      }
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -892,9 +899,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchBinarySearchSwitch:
       AssembleArchBinarySearchSwitch(instr);
       break;
-    case kArchLookupSwitch:
-      AssembleArchLookupSwitch(instr);
-      break;
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
@@ -914,7 +918,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ int3();
       break;
     case kArchDebugBreak:
-      __ int3();
+      __ DebugBreak();
       break;
     case kArchNop:
     case kArchThrowTerminator:
@@ -941,18 +945,32 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     case kArchStackPointerGreaterThan: {
+      // Potentially apply an offset to the current stack pointer before the
+      // comparison to consider the size difference of an optimized frame versus
+      // the contained unoptimized frames.
+      Register lhs_register = esp;
+      uint32_t offset;
+
+      if (ShouldApplyOffsetToStackCheck(instr, &offset)) {
+        lhs_register = i.TempRegister(0);
+        __ lea(lhs_register, Operand(esp, -1 * static_cast<int32_t>(offset)));
+      }
+
       constexpr size_t kValueIndex = 0;
       if (HasAddressingMode(instr)) {
-        __ cmp(esp, i.MemoryOperand(kValueIndex));
+        __ cmp(lhs_register, i.MemoryOperand(kValueIndex));
       } else {
-        __ cmp(esp, i.InputRegister(kValueIndex));
+        __ cmp(lhs_register, i.InputRegister(kValueIndex));
       }
       break;
     }
+    case kArchStackCheckOffset:
+      __ Move(i.OutputRegister(), Smi::FromInt(GetStackCheckOffset()));
+      break;
     case kArchTruncateDoubleToI: {
       auto result = i.OutputRegister();
       auto input = i.InputDoubleRegister(0);
-      auto ool = new (zone()) OutOfLineTruncateDoubleToI(
+      auto ool = zone()->New<OutOfLineTruncateDoubleToI>(
           this, result, input, DetermineStubCallMode());
       __ cvttsd2si(result, Operand(input));
       __ cmp(result, 1);
@@ -969,9 +987,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register value = i.InputRegister(index);
       Register scratch0 = i.TempRegister(0);
       Register scratch1 = i.TempRegister(1);
-      auto ool = new (zone())
-          OutOfLineRecordWrite(this, object, operand, value, scratch0, scratch1,
-                               mode, DetermineStubCallMode());
+      auto ool = zone()->New<OutOfLineRecordWrite>(this, object, operand, value,
+                                                   scratch0, scratch1, mode,
+                                                   DetermineStubCallMode());
       __ mov(operand, value);
       __ CheckPageFlag(object, scratch0,
                        MemoryChunk::kPointersFromHereAreInterestingMask,
@@ -1216,6 +1234,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ SarPair_cl(i.InputRegister(1), i.InputRegister(0));
       }
       break;
+    case kIA32Rol:
+      if (HasImmediateInput(instr, 1)) {
+        __ rol(i.OutputOperand(), i.InputInt5(1));
+      } else {
+        __ rol_cl(i.OutputOperand());
+      }
+      break;
     case kIA32Ror:
       if (HasImmediateInput(instr, 1)) {
         __ ror(i.OutputOperand(), i.InputInt5(1));
@@ -1314,7 +1339,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ ucomiss(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat32NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat32NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(above, &done_compare, Label::kNear);
       __ j(below, &compare_swap, Label::kNear);
@@ -1340,7 +1365,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ ucomisd(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat64NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat64NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(above, &done_compare, Label::kNear);
       __ j(below, &compare_swap, Label::kNear);
@@ -1365,7 +1390,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ ucomiss(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat32NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat32NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(below, &done_compare, Label::kNear);
       __ j(above, &compare_swap, Label::kNear);
@@ -1395,7 +1420,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ ucomisd(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat64NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat64NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(below, &done_compare, Label::kNear);
       __ j(above, &compare_swap, Label::kNear);
@@ -1898,14 +1923,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       XMMRegister src = i.InputSimd128Register(0);
       int8_t lane = i.InputInt8(1);
       DoubleRegister rep = i.InputDoubleRegister(2);
+      DCHECK_NE(dst, rep);
 
       DCHECK_LT(lane, 2);
       if (lane == 0) {
         __ vinsertps(dst, src, rep, 0b00000000);
-        __ vinsertps(dst, src, rep, 0b01010000);
+        __ vinsertps(dst, dst, rep, 0b01010000);
       } else {
-        __ vinsertps(dst, src, rep, 0b10100000);
-        __ vinsertps(dst, src, rep, 0b11110000);
+        __ vinsertps(dst, src, rep, 0b00100000);
+        __ vinsertps(dst, dst, rep, 0b01110000);
       }
       break;
     }
@@ -1994,6 +2020,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                  i.InputOperand(1));
       break;
     }
+    case kIA32F64x2Pmin: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      __ Minpd(dst, dst, i.InputSimd128Register(1));
+      break;
+    }
+    case kIA32F64x2Pmax: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      __ Maxpd(dst, dst, i.InputSimd128Register(1));
+      break;
+    }
+    case kIA32F64x2Round: {
+      RoundingMode const mode =
+          static_cast<RoundingMode>(MiscField::decode(instr->opcode()));
+      __ Roundpd(i.OutputSimd128Register(), i.InputDoubleRegister(0), mode);
+      break;
+    }
     case kIA32I64x2SplatI32Pair: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Pinsrd(dst, i.InputRegister(0), 0);
@@ -2012,6 +2056,70 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Operand src = i.InputOperand(0);
       __ Pxor(dst, dst);
       __ Psubq(dst, src);
+      break;
+    }
+    case kIA32I64x2Shl: {
+      ASSEMBLE_SIMD_SHIFT(Psllq, 6);
+      break;
+    }
+    case kIA32I64x2ShrS: {
+      XMMRegister dst = i.OutputSimd128Register();
+      XMMRegister src = i.InputSimd128Register(0);
+      XMMRegister tmp = i.TempSimd128Register(0);
+      XMMRegister tmp2 = i.TempSimd128Register(1);
+      Operand shift = i.InputOperand(1);
+
+      // Take shift value modulo 64.
+      __ and_(shift, Immediate(63));
+      __ Movd(tmp, shift);
+
+      // Set up a mask [0x80000000,0,0x80000000,0].
+      __ Pcmpeqb(tmp2, tmp2);
+      __ Psllq(tmp2, tmp2, 63);
+
+      __ Psrlq(tmp2, tmp2, tmp);
+      __ Psrlq(dst, src, tmp);
+      __ Pxor(dst, tmp2);
+      __ Psubq(dst, tmp2);
+      break;
+    }
+    case kIA32I64x2Add: {
+      __ Paddq(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
+    case kIA32I64x2Sub: {
+      __ Psubq(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
+    case kIA32I64x2Mul: {
+      XMMRegister dst = i.OutputSimd128Register();
+      XMMRegister left = i.InputSimd128Register(0);
+      XMMRegister right = i.InputSimd128Register(1);
+      XMMRegister tmp1 = i.TempSimd128Register(0);
+      XMMRegister tmp2 = i.TempSimd128Register(1);
+
+      __ Movaps(tmp1, left);
+      __ Movaps(tmp2, right);
+
+      // Multiply high dword of each qword of left with right.
+      __ Psrlq(tmp1, 32);
+      __ Pmuludq(tmp1, tmp1, right);
+
+      // Multiply high dword of each qword of right with left.
+      __ Psrlq(tmp2, 32);
+      __ Pmuludq(tmp2, tmp2, left);
+
+      __ Paddq(tmp2, tmp2, tmp1);
+      __ Psllq(tmp2, tmp2, 32);
+
+      __ Pmuludq(dst, left, right);
+      __ Paddq(dst, dst, tmp2);
+      break;
+    }
+    case kIA32I64x2ShrU: {
+      ASSEMBLE_SIMD_SHIFT(Psrlq, 6);
       break;
     }
     case kSSEF32x4Splat: {
@@ -2141,12 +2249,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kSSEF32x4Sqrt: {
-      __ sqrtps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ sqrtps(i.OutputSimd128Register(), i.InputOperand(0));
       break;
     }
     case kAVXF32x4Sqrt: {
       CpuFeatureScope avx_scope(tasm(), AVX);
-      __ vsqrtps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ vsqrtps(i.OutputSimd128Register(), i.InputOperand(0));
       break;
     }
     case kIA32F32x4RecipApprox: {
@@ -2234,11 +2342,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kAVXF32x4Min: {
       CpuFeatureScope avx_scope(tasm(), AVX);
       XMMRegister dst = i.OutputSimd128Register();
+      XMMRegister src0 = i.InputSimd128Register(0);
       Operand src1 = i.InputOperand(1);
       // See comment above for correction of minps.
       __ movups(kScratchDoubleReg, src1);
       __ vminps(kScratchDoubleReg, kScratchDoubleReg, dst);
-      __ vminps(dst, dst, src1);
+      __ vminps(dst, src0, src1);
       __ vorps(dst, dst, kScratchDoubleReg);
       __ vcmpneqps(kScratchDoubleReg, dst, dst);
       __ vorps(dst, dst, kScratchDoubleReg);
@@ -2327,6 +2436,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                   i.InputOperand(1));
       break;
     }
+    case kIA32F32x4Pmin: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      __ Minps(dst, dst, i.InputSimd128Register(1));
+      break;
+    }
+    case kIA32F32x4Pmax: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      __ Maxps(dst, dst, i.InputSimd128Register(1));
+      break;
+    }
+    case kIA32F32x4Round: {
+      RoundingMode const mode =
+          static_cast<RoundingMode>(MiscField::decode(instr->opcode()));
+      __ Roundps(i.OutputSimd128Register(), i.InputDoubleRegister(0), mode);
+      break;
+    }
     case kIA32I32x4Splat: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Movd(dst, i.InputOperand(0));
@@ -2407,44 +2534,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kSSEI32x4Shl: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ pslld(i.OutputSimd128Register(), tmp);
+    case kIA32I32x4Shl: {
+      ASSEMBLE_SIMD_SHIFT(Pslld, 5);
       break;
     }
-    case kAVXI32x4Shl: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ vpslld(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
-      break;
-    }
-    case kSSEI32x4ShrS: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ psrad(i.OutputSimd128Register(), tmp);
-      break;
-    }
-    case kAVXI32x4ShrS: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ vpsrad(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
+    case kIA32I32x4ShrS: {
+      ASSEMBLE_SIMD_SHIFT(Psrad, 5);
       break;
     }
     case kSSEI32x4Add: {
@@ -2637,24 +2732,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Pmovzxwd(dst, dst);
       break;
     }
-    case kSSEI32x4ShrU: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ psrld(i.OutputSimd128Register(), tmp);
-      break;
-    }
-    case kAVXI32x4ShrU: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 32.
-      __ and_(shift, 31);
-      __ movd(tmp, shift);
-      __ vpsrld(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
+    case kIA32I32x4ShrU: {
+      ASSEMBLE_SIMD_SHIFT(Psrld, 5);
       break;
     }
     case kSSEI32x4MinU: {
@@ -2720,6 +2799,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpcmpeqd(i.OutputSimd128Register(), kScratchDoubleReg, src2);
       break;
     }
+    case kIA32I32x4Abs: {
+      __ Pabsd(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kIA32I32x4BitMask: {
+      __ Movmskps(i.OutputRegister(), i.InputSimd128Register(0));
+      break;
+    }
+    case kIA32I32x4DotI16x8S: {
+      __ Pmaddwd(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                 i.InputSimd128Register(1));
+      break;
+    }
     case kIA32I16x8Splat: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Movd(dst, i.InputOperand(0));
@@ -2727,9 +2819,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Pshufd(dst, dst, 0x0);
       break;
     }
-    case kIA32I16x8ExtractLane: {
+    case kIA32I16x8ExtractLaneU: {
       Register dst = i.OutputRegister();
       __ Pextrw(dst, i.InputSimd128Register(0), i.InputInt8(1));
+      break;
+    }
+    case kIA32I16x8ExtractLaneS: {
+      Register dst = i.OutputRegister();
+      __ Pextrw(dst, i.InputSimd128Register(0), i.InputInt8(1));
+      __ movsx_w(dst, dst);
       break;
     }
     case kSSEI16x8ReplaceLane: {
@@ -2765,44 +2863,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kSSEI16x8Shl: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ psllw(i.OutputSimd128Register(), tmp);
+    case kIA32I16x8Shl: {
+      ASSEMBLE_SIMD_SHIFT(Psllw, 4);
       break;
     }
-    case kAVXI16x8Shl: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ vpsllw(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
-      break;
-    }
-    case kSSEI16x8ShrS: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ psraw(i.OutputSimd128Register(), tmp);
-      break;
-    }
-    case kAVXI16x8ShrS: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ vpsraw(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
+    case kIA32I16x8ShrS: {
+      ASSEMBLE_SIMD_SHIFT(Psraw, 4);
       break;
     }
     case kSSEI16x8SConvertI32x4: {
@@ -2969,48 +3035,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Pmovzxbw(dst, dst);
       break;
     }
-    case kSSEI16x8ShrU: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ psrlw(i.OutputSimd128Register(), tmp);
-      break;
-    }
-    case kAVXI16x8ShrU: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister tmp = i.TempSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      // Take shift value modulo 16.
-      __ and_(shift, 15);
-      __ movd(tmp, shift);
-      __ vpsrlw(i.OutputSimd128Register(), i.InputSimd128Register(0), tmp);
+    case kIA32I16x8ShrU: {
+      ASSEMBLE_SIMD_SHIFT(Psrlw, 4);
       break;
     }
     case kSSEI16x8UConvertI32x4: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       CpuFeatureScope sse_scope(tasm(), SSE4_1);
-      XMMRegister dst = i.OutputSimd128Register();
-      // Change negative lanes to 0x7FFFFFFF
-      __ pcmpeqd(kScratchDoubleReg, kScratchDoubleReg);
-      __ psrld(kScratchDoubleReg, 1);
-      __ pminud(dst, kScratchDoubleReg);
-      __ pminud(kScratchDoubleReg, i.InputOperand(1));
-      __ packusdw(dst, kScratchDoubleReg);
+      __ packusdw(i.OutputSimd128Register(), i.InputOperand(1));
       break;
     }
     case kAVXI16x8UConvertI32x4: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       CpuFeatureScope avx_scope(tasm(), AVX);
       XMMRegister dst = i.OutputSimd128Register();
-      // Change negative lanes to 0x7FFFFFFF
-      __ vpcmpeqd(kScratchDoubleReg, kScratchDoubleReg, kScratchDoubleReg);
-      __ vpsrld(kScratchDoubleReg, kScratchDoubleReg, 1);
-      __ vpminud(dst, kScratchDoubleReg, i.InputSimd128Register(0));
-      __ vpminud(kScratchDoubleReg, kScratchDoubleReg, i.InputOperand(1));
-      __ vpackusdw(dst, dst, kScratchDoubleReg);
+      __ vpackusdw(dst, dst, i.InputOperand(1));
       break;
     }
     case kSSEI16x8AddSaturateU: {
@@ -3098,6 +3137,23 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpcmpeqw(i.OutputSimd128Register(), kScratchDoubleReg, src2);
       break;
     }
+    case kIA32I16x8RoundingAverageU: {
+      __ Pavgw(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
+    case kIA32I16x8Abs: {
+      __ Pabsw(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kIA32I16x8BitMask: {
+      Register dst = i.OutputRegister();
+      XMMRegister tmp = i.TempSimd128Register(0);
+      __ Packsswb(tmp, i.InputSimd128Register(0));
+      __ Pmovmskb(dst, tmp);
+      __ shr(dst, 8);
+      break;
+    }
     case kIA32I8x16Splat: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Movd(dst, i.InputOperand(0));
@@ -3105,9 +3161,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Pshufb(dst, kScratchDoubleReg);
       break;
     }
-    case kIA32I8x16ExtractLane: {
+    case kIA32I8x16ExtractLaneU: {
       Register dst = i.OutputRegister();
       __ Pextrb(dst, i.InputSimd128Register(0), i.InputInt8(1));
+      break;
+    }
+    case kIA32I8x16ExtractLaneS: {
+      Register dst = i.OutputRegister();
+      __ Pextrb(dst, i.InputSimd128Register(0), i.InputInt8(1));
+      __ movsx_b(dst, dst);
       break;
     }
     case kSSEI8x16ReplaceLane: {
@@ -3145,63 +3207,67 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kSSEI8x16Shl: {
+    case kIA32I8x16Shl: {
       XMMRegister dst = i.OutputSimd128Register();
       DCHECK_EQ(dst, i.InputSimd128Register(0));
-      Register shift = i.InputRegister(1);
       Register tmp = i.ToRegister(instr->TempAt(0));
       XMMRegister tmp_simd = i.TempSimd128Register(1);
-      // Take shift value modulo 8.
-      __ and_(shift, 7);
-      // Mask off the unwanted bits before word-shifting.
-      __ pcmpeqw(kScratchDoubleReg, kScratchDoubleReg);
-      __ mov(tmp, shift);
-      __ add(tmp, Immediate(8));
-      __ movd(tmp_simd, tmp);
-      __ psrlw(kScratchDoubleReg, tmp_simd);
-      __ packuswb(kScratchDoubleReg, kScratchDoubleReg);
-      __ pand(dst, kScratchDoubleReg);
-      __ movd(tmp_simd, shift);
-      __ psllw(dst, tmp_simd);
-      break;
-    }
-    case kAVXI8x16Shl: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
-      XMMRegister dst = i.OutputSimd128Register();
-      XMMRegister src = i.InputSimd128Register(0);
-      Register shift = i.InputRegister(1);
-      Register tmp = i.ToRegister(instr->TempAt(0));
-      XMMRegister tmp_simd = i.TempSimd128Register(1);
-      // Take shift value modulo 8.
-      __ and_(shift, 7);
-      // Mask off the unwanted bits before word-shifting.
-      __ vpcmpeqw(kScratchDoubleReg, kScratchDoubleReg, kScratchDoubleReg);
-      __ mov(tmp, shift);
-      __ add(tmp, Immediate(8));
-      __ movd(tmp_simd, tmp);
-      __ vpsrlw(kScratchDoubleReg, kScratchDoubleReg, tmp_simd);
-      __ vpackuswb(kScratchDoubleReg, kScratchDoubleReg, kScratchDoubleReg);
-      __ vpand(dst, src, kScratchDoubleReg);
-      __ movd(tmp_simd, shift);
-      __ vpsllw(dst, dst, tmp_simd);
+
+      if (HasImmediateInput(instr, 1)) {
+        // Perform 16-bit shift, then mask away low bits.
+        uint8_t shift = i.InputInt3(1);
+        __ Psllw(dst, dst, byte{shift});
+
+        uint8_t bmask = static_cast<uint8_t>(0xff << shift);
+        uint32_t mask = bmask << 24 | bmask << 16 | bmask << 8 | bmask;
+        __ mov(tmp, mask);
+        __ Movd(tmp_simd, tmp);
+        __ Pshufd(tmp_simd, tmp_simd, 0);
+        __ Pand(dst, tmp_simd);
+      } else {
+        // Take shift value modulo 8.
+        __ mov(tmp, i.InputRegister(1));
+        __ and_(tmp, 7);
+        // Mask off the unwanted bits before word-shifting.
+        __ Pcmpeqw(kScratchDoubleReg, kScratchDoubleReg);
+        __ add(tmp, Immediate(8));
+        __ Movd(tmp_simd, tmp);
+        __ Psrlw(kScratchDoubleReg, kScratchDoubleReg, tmp_simd);
+        __ Packuswb(kScratchDoubleReg, kScratchDoubleReg);
+        __ Pand(dst, kScratchDoubleReg);
+        // TODO(zhin): sub here to avoid asking for another temporary register,
+        // examine codegen for other i8x16 shifts, they use less instructions.
+        __ sub(tmp, Immediate(8));
+        __ Movd(tmp_simd, tmp);
+        __ Psllw(dst, dst, tmp_simd);
+      }
       break;
     }
     case kIA32I8x16ShrS: {
       XMMRegister dst = i.OutputSimd128Register();
       DCHECK_EQ(dst, i.InputSimd128Register(0));
-      Register tmp = i.ToRegister(instr->TempAt(0));
-      XMMRegister tmp_simd = i.TempSimd128Register(1);
-      // Unpack the bytes into words, do arithmetic shifts, and repack.
-      __ punpckhbw(kScratchDoubleReg, dst);
-      __ punpcklbw(dst, dst);
-      __ mov(tmp, i.InputRegister(1));
-      // Take shift value modulo 8.
-      __ and_(tmp, 7);
-      __ add(tmp, Immediate(8));
-      __ movd(tmp_simd, tmp);
-      __ psraw(kScratchDoubleReg, tmp_simd);
-      __ psraw(dst, tmp_simd);
-      __ packsswb(dst, kScratchDoubleReg);
+      if (HasImmediateInput(instr, 1)) {
+        __ Punpckhbw(kScratchDoubleReg, dst);
+        __ Punpcklbw(dst, dst);
+        uint8_t shift = i.InputInt3(1) + 8;
+        __ Psraw(kScratchDoubleReg, shift);
+        __ Psraw(dst, shift);
+        __ Packsswb(dst, kScratchDoubleReg);
+      } else {
+        Register tmp = i.ToRegister(instr->TempAt(0));
+        XMMRegister tmp_simd = i.TempSimd128Register(1);
+        // Unpack the bytes into words, do arithmetic shifts, and repack.
+        __ Punpckhbw(kScratchDoubleReg, dst);
+        __ Punpcklbw(dst, dst);
+        __ mov(tmp, i.InputRegister(1));
+        // Take shift value modulo 8.
+        __ and_(tmp, 7);
+        __ add(tmp, Immediate(8));
+        __ Movd(tmp_simd, tmp);
+        __ Psraw(kScratchDoubleReg, kScratchDoubleReg, tmp_simd);
+        __ Psraw(dst, dst, tmp_simd);
+        __ Packsswb(dst, kScratchDoubleReg);
+      }
       break;
     }
     case kSSEI8x16Add: {
@@ -3410,24 +3476,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       CpuFeatureScope sse_scope(tasm(), SSE4_1);
       XMMRegister dst = i.OutputSimd128Register();
-      // Change negative lanes to 0x7FFF
-      __ pcmpeqw(kScratchDoubleReg, kScratchDoubleReg);
-      __ psrlw(kScratchDoubleReg, 1);
-      __ pminuw(dst, kScratchDoubleReg);
-      __ pminuw(kScratchDoubleReg, i.InputOperand(1));
-      __ packuswb(dst, kScratchDoubleReg);
+      __ packuswb(dst, i.InputOperand(1));
       break;
     }
     case kAVXI8x16UConvertI16x8: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       CpuFeatureScope avx_scope(tasm(), AVX);
       XMMRegister dst = i.OutputSimd128Register();
-      // Change negative lanes to 0x7FFF
-      __ vpcmpeqw(kScratchDoubleReg, kScratchDoubleReg, kScratchDoubleReg);
-      __ vpsrlw(kScratchDoubleReg, kScratchDoubleReg, 1);
-      __ vpminuw(dst, kScratchDoubleReg, i.InputSimd128Register(0));
-      __ vpminuw(kScratchDoubleReg, kScratchDoubleReg, i.InputOperand(1));
-      __ vpackuswb(dst, dst, kScratchDoubleReg);
+      __ vpackuswb(dst, dst, i.InputOperand(1));
       break;
     }
     case kSSEI8x16AddSaturateU: {
@@ -3453,21 +3509,35 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kIA32I8x16ShrU: {
-      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       Register tmp = i.ToRegister(instr->TempAt(0));
       XMMRegister tmp_simd = i.TempSimd128Register(1);
-      // Unpack the bytes into words, do logical shifts, and repack.
-      __ punpckhbw(kScratchDoubleReg, dst);
-      __ punpcklbw(dst, dst);
-      __ mov(tmp, i.InputRegister(1));
-      // Take shift value modulo 8.
-      __ and_(tmp, 7);
-      __ add(tmp, Immediate(8));
-      __ movd(tmp_simd, tmp);
-      __ psrlw(kScratchDoubleReg, tmp_simd);
-      __ psrlw(dst, tmp_simd);
-      __ packuswb(dst, kScratchDoubleReg);
+
+      if (HasImmediateInput(instr, 1)) {
+        // Perform 16-bit shift, then mask away high bits.
+        uint8_t shift = i.InputInt3(1);
+        __ Psrlw(dst, dst, byte{shift});
+
+        uint8_t bmask = 0xff >> shift;
+        uint32_t mask = bmask << 24 | bmask << 16 | bmask << 8 | bmask;
+        __ mov(tmp, mask);
+        __ Movd(tmp_simd, tmp);
+        __ Pshufd(tmp_simd, tmp_simd, 0);
+        __ Pand(dst, tmp_simd);
+      } else {
+        // Unpack the bytes into words, do logical shifts, and repack.
+        __ Punpckhbw(kScratchDoubleReg, dst);
+        __ Punpcklbw(dst, dst);
+        __ mov(tmp, i.InputRegister(1));
+        // Take shift value modulo 8.
+        __ and_(tmp, 7);
+        __ add(tmp, Immediate(8));
+        __ Movd(tmp_simd, tmp);
+        __ Psrlw(kScratchDoubleReg, kScratchDoubleReg, tmp_simd);
+        __ Psrlw(dst, dst, tmp_simd);
+        __ Packuswb(dst, kScratchDoubleReg);
+      }
       break;
     }
     case kSSEI8x16MinU: {
@@ -3530,9 +3600,38 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpcmpeqb(i.OutputSimd128Register(), kScratchDoubleReg, src2);
       break;
     }
+    case kIA32I8x16RoundingAverageU: {
+      __ Pavgb(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
+    case kIA32I8x16Abs: {
+      __ Pabsb(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kIA32I8x16BitMask: {
+      __ Pmovmskb(i.OutputRegister(), i.InputSimd128Register(0));
+      break;
+    }
+    case kIA32S128Const: {
+      XMMRegister dst = i.OutputSimd128Register();
+      Register tmp = i.TempRegister(0);
+      uint64_t low_qword = make_uint64(i.InputUint32(1), i.InputUint32(0));
+      __ Move(dst, low_qword);
+      __ Move(tmp, Immediate(i.InputUint32(2)));
+      __ Pinsrd(dst, tmp, 2);
+      __ Move(tmp, Immediate(i.InputUint32(3)));
+      __ Pinsrd(dst, tmp, 3);
+      break;
+    }
     case kIA32S128Zero: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Pxor(dst, dst);
+      break;
+    }
+    case kIA32S128AllOnes: {
+      XMMRegister dst = i.OutputSimd128Register();
+      __ Pcmpeqd(dst, dst);
       break;
     }
     case kSSES128Not: {
@@ -3605,6 +3704,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vxorps(dst, kScratchDoubleReg, i.InputSimd128Register(2));
       break;
     }
+    case kIA32S128AndNot: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      // The inputs have been inverted by instruction selector, so we can call
+      // andnps here without any modifications.
+      XMMRegister src1 = i.InputSimd128Register(1);
+      __ Andnps(dst, src1);
+      break;
+    }
     case kIA32S8x16Swizzle: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       XMMRegister dst = i.OutputSimd128Register();
@@ -3612,7 +3720,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 
       // Out-of-range indices should return 0, add 112 so that any value > 15
       // saturates to 128 (top bit set), so pshufb will zero that lane.
-      __ Move(mask, (uint32_t)0x70707070);
+      __ Move(mask, uint32_t{0x70707070});
       __ Pshufd(mask, mask, 0x0);
       __ Paddusb(mask, i.InputSimd128Register(1));
       __ Pshufb(dst, mask);
@@ -3660,6 +3768,51 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ por(dst, kScratchDoubleReg);
       }
       __ mov(esp, tmp);
+      break;
+    }
+    case kIA32S8x16LoadSplat: {
+      __ Pinsrb(i.OutputSimd128Register(), i.MemoryOperand(), 0);
+      __ Pxor(kScratchDoubleReg, kScratchDoubleReg);
+      __ Pshufb(i.OutputSimd128Register(), kScratchDoubleReg);
+      break;
+    }
+    case kIA32S16x8LoadSplat: {
+      __ Pinsrw(i.OutputSimd128Register(), i.MemoryOperand(), 0);
+      __ Pshuflw(i.OutputSimd128Register(), i.OutputSimd128Register(),
+                 uint8_t{0});
+      __ Punpcklqdq(i.OutputSimd128Register(), i.OutputSimd128Register());
+      break;
+    }
+    case kIA32S32x4LoadSplat: {
+      __ Vbroadcastss(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32S64x2LoadSplat: {
+      __ Movddup(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I16x8Load8x8S: {
+      __ Pmovsxbw(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I16x8Load8x8U: {
+      __ Pmovzxbw(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I32x4Load16x4S: {
+      __ Pmovsxwd(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I32x4Load16x4U: {
+      __ Pmovzxwd(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I64x2Load32x2S: {
+      __ Pmovsxdq(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I64x2Load32x2U: {
+      __ Pmovzxdq(i.OutputSimd128Register(), i.MemoryOperand());
       break;
     }
     case kIA32S32x4Swizzle: {
@@ -3974,9 +4127,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpor(dst, dst, kScratchDoubleReg);
       break;
     }
-    case kIA32S1x4AnyTrue:
-    case kIA32S1x8AnyTrue:
-    case kIA32S1x16AnyTrue: {
+    case kIA32V32x4AnyTrue:
+    case kIA32V16x8AnyTrue:
+    case kIA32V8x16AnyTrue: {
       Register dst = i.OutputRegister();
       XMMRegister src = i.InputSimd128Register(0);
       Register tmp = i.TempRegister(0);
@@ -3990,26 +4143,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     // comparison instruction used matters, e.g. given 0xff00, pcmpeqb returns
     // 0x0011, pcmpeqw returns 0x0000, ptest will set ZF to 0 and 1
     // respectively.
-    case kIA32S1x4AllTrue:
+    case kIA32V32x4AllTrue:
       ASSEMBLE_SIMD_ALL_TRUE(Pcmpeqd);
       break;
-    case kIA32S1x8AllTrue:
+    case kIA32V16x8AllTrue:
       ASSEMBLE_SIMD_ALL_TRUE(pcmpeqw);
       break;
-    case kIA32S1x16AllTrue: {
+    case kIA32V8x16AllTrue: {
       ASSEMBLE_SIMD_ALL_TRUE(pcmpeqb);
       break;
     }
     case kIA32Word32AtomicPairLoad: {
       XMMRegister tmp = i.ToDoubleRegister(instr->TempAt(0));
       __ movq(tmp, i.MemoryOperand());
-      if (instr->OutputCount() == 2) {
-        __ Pextrd(i.OutputRegister(0), tmp, 0);
-        __ Pextrd(i.OutputRegister(1), tmp, 1);
-      } else if (instr->OutputCount() == 1) {
-        __ Pextrd(i.OutputRegister(0), tmp, 0);
-        __ Pextrd(i.TempRegister(1), tmp, 1);
-      }
+      __ Pextrd(i.OutputRegister(0), tmp, 0);
+      __ Pextrd(i.OutputRegister(1), tmp, 1);
       break;
     }
     case kIA32Word32AtomicPairStore: {
@@ -4289,7 +4437,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         __ PrepareCallCFunction(0, esi);
         __ CallCFunction(
             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
-        __ LeaveFrame(StackFrame::WASM_COMPILED);
+        __ LeaveFrame(StackFrame::WASM);
         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
         size_t pop_size =
             call_descriptor->StackParameterCount() * kSystemPointerSize;
@@ -4302,7 +4450,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         // is added to the native module and copied into wasm code space.
         __ wasm_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
         ReferenceMap* reference_map =
-            new (gen_->zone()) ReferenceMap(gen_->zone());
+            gen_->zone()->New<ReferenceMap>(gen_->zone());
         gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
       }
@@ -4311,11 +4459,11 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
     Instruction* instr_;
     CodeGenerator* gen_;
   };
-  auto ool = new (zone()) OutOfLineTrap(this, instr);
+  auto ool = zone()->New<OutOfLineTrap>(this, instr);
   Label* tlabel = ool->entry();
   Label end;
   if (condition == kUnorderedEqual) {
-    __ j(parity_even, &end);
+    __ j(parity_even, &end, Label::kNear);
   } else if (condition == kUnorderedNotEqual) {
     __ j(parity_even, tlabel);
   }
@@ -4371,16 +4519,6 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   }
   AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size());
-}
-
-void CodeGenerator::AssembleArchLookupSwitch(Instruction* instr) {
-  IA32OperandConverter i(this, instr);
-  Register input = i.InputRegister(0);
-  for (size_t index = 2; index < instr->InputCount(); index += 2) {
-    __ cmp(input, Immediate(i.InputInt32(index + 0)));
-    __ j(equal, GetLabel(i.InputRpo(index + 1)));
-  }
-  AssembleArchJump(i.InputRpo(1));
 }
 
 void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
@@ -4559,7 +4697,7 @@ void CodeGenerator::AssembleConstructFrame() {
         __ push(kWasmInstanceRegister);
       } else if (call_descriptor->IsWasmImportWrapper() ||
                  call_descriptor->IsWasmCapiFunction()) {
-        // WASM import wrappers are passed a tuple in the place of the instance.
+        // Wasm import wrappers are passed a tuple in the place of the instance.
         // Unpack the tuple into the instance and the target callable.
         // This must be done here in the codegen because it cannot be expressed
         // properly in the graph.
@@ -4617,12 +4755,12 @@ void CodeGenerator::AssembleConstructFrame() {
         __ add(scratch, Immediate(required_slots * kSystemPointerSize));
         __ cmp(esp, scratch);
         __ pop(scratch);
-        __ j(above_equal, &done);
+        __ j(above_equal, &done, Label::kNear);
       }
 
       __ wasm_call(wasm::WasmCode::kWasmStackOverflow,
                    RelocInfo::WASM_STUB_CALL);
-      ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+      ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
       RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
       __ bind(&done);
@@ -4956,6 +5094,7 @@ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
 #undef ASSEMBLE_SIMD_PUNPCK_SHUFFLE
 #undef ASSEMBLE_SIMD_IMM_SHUFFLE
 #undef ASSEMBLE_SIMD_ALL_TRUE
+#undef ASSEMBLE_SIMD_SHIFT
 
 }  // namespace compiler
 }  // namespace internal

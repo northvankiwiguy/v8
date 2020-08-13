@@ -11,6 +11,7 @@
 #include "src/debug/debug.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/combined-heap.h"
+#include "src/heap/safepoint.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/api-callbacks.h"
@@ -181,7 +182,9 @@ const char* HeapEntry::TypeAsString() {
   }
 }
 
-HeapSnapshot::HeapSnapshot(HeapProfiler* profiler) : profiler_(profiler) {
+HeapSnapshot::HeapSnapshot(HeapProfiler* profiler, bool global_objects_as_roots)
+    : profiler_(profiler),
+      treat_global_objects_as_roots_(global_objects_as_roots) {
   // It is very important to keep objects that form a heap snapshot
   // as small as possible. Check assumptions about data structure sizes.
   STATIC_ASSERT((kSystemPointerSize == 4 && sizeof(HeapGraphEdge) == 12) ||
@@ -878,7 +881,7 @@ void V8HeapExplorer::ExtractJSObjectReferences(HeapEntry* entry,
                          JSGlobalObject::kNativeContextOffset);
     SetInternalReference(entry, "global_proxy", global_obj.global_proxy(),
                          JSGlobalObject::kGlobalProxyOffset);
-    STATIC_ASSERT(JSGlobalObject::kSize - JSObject::kHeaderSize ==
+    STATIC_ASSERT(JSGlobalObject::kHeaderSize - JSObject::kHeaderSize ==
                   2 * kTaggedSize);
   } else if (obj.IsJSArrayBufferView()) {
     JSArrayBufferView view = JSArrayBufferView::cast(obj);
@@ -913,7 +916,8 @@ void V8HeapExplorer::ExtractStringReferences(HeapEntry* entry, String string) {
 }
 
 void V8HeapExplorer::ExtractSymbolReferences(HeapEntry* entry, Symbol symbol) {
-  SetInternalReference(entry, "name", symbol.name(), Symbol::kNameOffset);
+  SetInternalReference(entry, "name", symbol.description(),
+                       Symbol::kDescriptionOffset);
 }
 
 void V8HeapExplorer::ExtractJSCollectionReferences(HeapEntry* entry,
@@ -941,11 +945,16 @@ void V8HeapExplorer::ExtractEphemeronHashTableReferences(
                      table.OffsetOfElementAt(value_index));
     HeapEntry* key_entry = GetEntry(key);
     HeapEntry* value_entry = GetEntry(value);
-    if (key_entry && value_entry) {
-      const char* edge_name =
-          names_->GetFormatted("key %s in WeakMap", key_entry->name());
+    HeapEntry* table_entry = GetEntry(table);
+    if (key_entry && value_entry && !key.IsUndefined()) {
+      const char* edge_name = names_->GetFormatted(
+          "part of key (%s @%u) -> value (%s @%u) pair in WeakMap (table @%u)",
+          key_entry->name(), key_entry->id(), value_entry->name(),
+          value_entry->id(), table_entry->id());
       key_entry->SetNamedAutoIndexReference(HeapGraphEdge::kInternal, edge_name,
                                             value_entry, names_);
+      table_entry->SetNamedAutoIndexReference(HeapGraphEdge::kInternal,
+                                              edge_name, value_entry, names_);
     }
   }
 }
@@ -970,7 +979,7 @@ void V8HeapExplorer::ExtractContextReferences(HeapEntry* entry,
     int context_locals = scope_info.ContextLocalCount();
     for (int i = 0; i < context_locals; ++i) {
       String local_name = scope_info.ContextLocalName(i);
-      int idx = Context::MIN_CONTEXT_SLOTS + i;
+      int idx = scope_info.ContextHeaderLength() + i;
       SetContextReference(entry, local_name, context.get(idx),
                           Context::OffsetOfElementAt(idx));
     }
@@ -1040,8 +1049,7 @@ void V8HeapExplorer::ExtractMapReferences(HeapEntry* entry, Map map) {
       TagObject(transitions, "(transition array)");
       SetInternalReference(entry, "transitions", transitions,
                            Map::kTransitionsOrPrototypeInfoOffset);
-    } else if (raw_transitions_or_prototype_info.IsTuple3() ||
-               raw_transitions_or_prototype_info.IsFixedArray()) {
+    } else if (raw_transitions_or_prototype_info.IsFixedArray()) {
       TagObject(raw_transitions_or_prototype_info, "(transition)");
       SetInternalReference(entry, "transition",
                            raw_transitions_or_prototype_info,
@@ -1099,7 +1107,7 @@ void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
   } else {
     TagObject(shared.GetCode(),
               names_->GetFormatted("(%s code)",
-                                   Code::Kind2String(shared.GetCode().kind())));
+                                   CodeKindToString(shared.GetCode().kind())));
   }
 
   if (shared.name_or_scope_info().IsScopeInfo()) {
@@ -1122,7 +1130,7 @@ void V8HeapExplorer::ExtractScriptReferences(HeapEntry* entry, Script script) {
   SetInternalReference(entry, "source", script.source(), Script::kSourceOffset);
   SetInternalReference(entry, "name", script.name(), Script::kNameOffset);
   SetInternalReference(entry, "context_data", script.context_data(),
-                       Script::kContextOffset);
+                       Script::kContextDataOffset);
   TagObject(script.line_ends(), "(script line ends)");
   SetInternalReference(entry, "line_ends", script.line_ends(),
                        Script::kLineEndsOffset);
@@ -1460,6 +1468,17 @@ class RootsReferencesExtractor : public RootVisitor {
     }
   }
 
+  void VisitRootPointers(Root root, const char* description,
+                         OffHeapObjectSlot start,
+                         OffHeapObjectSlot end) override {
+    DCHECK_EQ(root, Root::kStringTable);
+    const Isolate* isolate = Isolate::FromHeap(explorer_->heap_);
+    for (OffHeapObjectSlot p = start; p < end; ++p) {
+      explorer_->SetGcSubrootReference(root, description, visiting_weak_roots_,
+                                       p.load(isolate));
+    }
+  }
+
  private:
   V8HeapExplorer* explorer_;
   bool visiting_weak_roots_;
@@ -1480,7 +1499,11 @@ bool V8HeapExplorer::IterateAndExtractReferences(
   // its custom name to a generic builtin.
   RootsReferencesExtractor extractor(this);
   ReadOnlyRoots(heap_).Iterate(&extractor);
-  heap_->IterateRoots(&extractor, VISIT_ONLY_STRONG);
+  heap_->IterateRoots(&extractor, base::EnumSet<SkipRoot>{SkipRoot::kWeak});
+  // TODO(ulan): The heap snapshot generator incorrectly considers the weak
+  // string tables as strong retainers. Move IterateWeakRoots after
+  // SetVisitingWeakRoots.
+  heap_->IterateWeakRoots(&extractor, {});
   extractor.SetVisitingWeakRoots();
   heap_->IterateWeakGlobalHandles(&extractor);
 
@@ -1714,7 +1737,7 @@ void V8HeapExplorer::SetGcSubrootReference(Root root, const char* description,
 
   // For full heap snapshots we do not emit user roots but rather rely on
   // regular GC roots to retain objects.
-  if (FLAG_raw_heap_snapshots) return;
+  if (!snapshot_->treat_global_objects_as_roots()) return;
 
   // Add a shortcut to JS global object reference at snapshot root.
   // That allows the user to easily find global objects. They are
@@ -1754,22 +1777,38 @@ void V8HeapExplorer::TagObject(Object obj, const char* tag) {
 
 class GlobalObjectsEnumerator : public RootVisitor {
  public:
+  explicit GlobalObjectsEnumerator(Isolate* isolate) : isolate_(isolate) {}
+
   void VisitRootPointers(Root root, const char* description,
                          FullObjectSlot start, FullObjectSlot end) override {
-    for (FullObjectSlot p = start; p < end; ++p) {
-      if (!(*p).IsNativeContext()) continue;
-      JSObject proxy = Context::cast(*p).global_proxy();
-      if (!proxy.IsJSGlobalProxy()) continue;
-      Object global = proxy.map().prototype();
-      if (!global.IsJSGlobalObject()) continue;
-      objects_.push_back(Handle<JSGlobalObject>(JSGlobalObject::cast(global),
-                                                proxy.GetIsolate()));
-    }
+    VisitRootPointersImpl(root, description, start, end);
   }
+
+  void VisitRootPointers(Root root, const char* description,
+                         OffHeapObjectSlot start,
+                         OffHeapObjectSlot end) override {
+    VisitRootPointersImpl(root, description, start, end);
+  }
+
   int count() const { return static_cast<int>(objects_.size()); }
   Handle<JSGlobalObject>& at(int i) { return objects_[i]; }
 
  private:
+  template <typename TSlot>
+  void VisitRootPointersImpl(Root root, const char* description, TSlot start,
+                             TSlot end) {
+    for (TSlot p = start; p < end; ++p) {
+      Object o = p.load(isolate_);
+      if (!o.IsNativeContext(isolate_)) continue;
+      JSObject proxy = Context::cast(o).global_proxy();
+      if (!proxy.IsJSGlobalProxy(isolate_)) continue;
+      Object global = proxy.map(isolate_).prototype(isolate_);
+      if (!global.IsJSGlobalObject(isolate_)) continue;
+      objects_.push_back(handle(JSGlobalObject::cast(global), isolate_));
+    }
+  }
+
+  Isolate* isolate_;
   std::vector<Handle<JSGlobalObject>> objects_;
 };
 
@@ -1778,7 +1817,7 @@ class GlobalObjectsEnumerator : public RootVisitor {
 void V8HeapExplorer::TagGlobalObjects() {
   Isolate* isolate = Isolate::FromHeap(heap_);
   HandleScope scope(isolate);
-  GlobalObjectsEnumerator enumerator;
+  GlobalObjectsEnumerator enumerator(isolate);
   isolate->global_handles()->IterateAllRoots(&enumerator);
   std::vector<const char*> urls(enumerator.count());
   for (int i = 0, l = enumerator.count(); i < l; ++i) {
@@ -2026,6 +2065,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
                                   GarbageCollectionReason::kHeapProfiler);
 
   NullContextForSnapshotScope null_context_scope(Isolate::FromHeap(heap_));
+  SafepointScope scope(heap_);
 
 #ifdef VERIFY_HEAP
   Heap* debug_heap = heap_;

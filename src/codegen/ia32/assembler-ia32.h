@@ -343,8 +343,8 @@ class Displacement {
  private:
   int data_;
 
-  using TypeField = BitField<Type, 0, 2>;
-  using NextField = BitField<int, 2, 32 - 2>;
+  using TypeField = base::BitField<Type, 0, 2>;
+  using NextField = base::BitField<int, 2, 32 - 2>;
 
   void init(Label* L, Type type);
 };
@@ -361,6 +361,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // otherwise valid instructions.)
   // This allows for a single, fast space check per instruction.
   static constexpr int kGap = 32;
+  STATIC_ASSERT(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
 
  public:
   // Create an assembler. Instructions and relocation information are emitted
@@ -527,6 +528,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void rep_stos();
   void stos();
 
+  void xadd(Operand dst, Register src);
+  void xadd_b(Operand dst, Register src);
+  void xadd_w(Operand dst, Register src);
+
   // Exchange
   void xchg(Register dst, Register src);
   void xchg(Register dst, Operand src);
@@ -633,6 +638,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   void rcl(Register dst, uint8_t imm8);
   void rcr(Register dst, uint8_t imm8);
+
+  void rol(Register dst, uint8_t imm8) { rol(Operand(dst), imm8); }
+  void rol(Operand dst, uint8_t imm8);
+  void rol_cl(Register dst) { rol_cl(Operand(dst)); }
+  void rol_cl(Operand dst);
 
   void ror(Register dst, uint8_t imm8) { ror(Operand(dst), imm8); }
   void ror(Operand dst, uint8_t imm8);
@@ -957,6 +967,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void movmskpd(Register dst, XMMRegister src);
   void movmskps(Register dst, XMMRegister src);
 
+  void pmovmskb(Register dst, XMMRegister src);
+
   void cmpltsd(XMMRegister dst, XMMRegister src);
 
   void maxsd(XMMRegister dst, XMMRegister src) { maxsd(dst, Operand(src)); }
@@ -1025,6 +1037,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     pextrb(Operand(dst), src, offset);
   }
   void pextrb(Operand dst, XMMRegister src, uint8_t offset);
+  // SSE3 instructions
+  void movddup(XMMRegister dst, Operand src);
+  void movddup(XMMRegister dst, XMMRegister src) { movddup(dst, Operand(src)); }
+
   // Use SSE4_1 encoding for pextrw reg, xmm, imm8 for consistency
   void pextrw(Register dst, XMMRegister src, uint8_t offset) {
     pextrw(Operand(dst), src, offset);
@@ -1051,6 +1067,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     pinsrd(dst, Operand(src), offset);
   }
   void pinsrd(XMMRegister dst, Operand src, uint8_t offset);
+
+  void roundps(XMMRegister dst, XMMRegister src, RoundingMode mode);
+  void roundpd(XMMRegister dst, XMMRegister src, RoundingMode mode);
 
   // AVX instructions
   void vfmadd132sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
@@ -1397,6 +1416,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
   void vpinsrd(XMMRegister dst, XMMRegister src1, Operand src2, uint8_t offset);
 
+  void vroundps(XMMRegister dst, XMMRegister src, RoundingMode mode);
+  void vroundpd(XMMRegister dst, XMMRegister src, RoundingMode mode);
+
   void vcvtdq2ps(XMMRegister dst, XMMRegister src) {
     vcvtdq2ps(dst, Operand(src));
   }
@@ -1410,6 +1432,15 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x5B, dst, xmm0, src, kF3, k0F, kWIG);
   }
 
+  void vmovddup(XMMRegister dst, Operand src) {
+    vinstr(0x12, dst, xmm0, src, kF2, k0F, kWIG);
+  }
+  void vmovddup(XMMRegister dst, XMMRegister src) {
+    vmovddup(dst, Operand(src));
+  }
+  void vbroadcastss(XMMRegister dst, Operand src) {
+    vinstr(0x18, dst, xmm0, src, k66, k0F38, kW0);
+  }
   void vmovdqu(XMMRegister dst, Operand src) {
     vinstr(0x6F, dst, xmm0, src, kF3, k0F, kWIG);
   }
@@ -1424,6 +1455,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vmovd(Operand dst, XMMRegister src) {
     vinstr(0x7E, src, xmm0, dst, k66, k0F, kWIG);
   }
+
+  void vmovmskps(Register dst, XMMRegister src);
+
+  void vpmovmskb(Register dst, XMMRegister src);
 
   // BMI instruction
   void andn(Register dst, Register src1, Register src2) {
@@ -1605,6 +1640,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
 
   SSSE3_INSTRUCTION_LIST(DECLARE_SSSE3_INSTRUCTION)
+  SSSE3_UNOP_INSTRUCTION_LIST(DECLARE_SSSE3_INSTRUCTION)
 #undef DECLARE_SSSE3_INSTRUCTION
 
 #define DECLARE_SSE4_INSTRUCTION(instruction, prefix, escape1, escape2,     \
@@ -1642,6 +1678,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x##opcode, dst, xmm0, src, k##prefix, k##escape1##escape2, kW0);   \
   }
 
+  SSSE3_UNOP_INSTRUCTION_LIST(DECLARE_SSE4_AVX_RM_INSTRUCTION)
   SSE4_RM_INSTRUCTION_LIST(DECLARE_SSE4_AVX_RM_INSTRUCTION)
 #undef DECLARE_SSE4_AVX_RM_INSTRUCTION
 

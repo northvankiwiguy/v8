@@ -53,15 +53,36 @@ class ExpressionScope {
       AsExpressionParsingScope()->TrackVariable(result);
     } else {
       Variable* var = Declare(name, pos);
-      if (IsVarDeclaration() && !parser()->scope()->is_declaration_scope()) {
-        // Make sure we'll properly resolve the variable since we might be in a
-        // with or catch scope. In those cases the proxy isn't guaranteed to
-        // refer to the declared variable, so consider it unresolved.
-        parser()->scope()->AddUnresolved(result);
-      } else {
-        DCHECK_NOT_NULL(var);
-        result->BindTo(var);
+      if (IsVarDeclaration()) {
+        bool passed_through_with = false;
+        for (Scope* scope = parser()->scope(); !scope->is_declaration_scope();
+             scope = scope->outer_scope()) {
+          if (scope->is_with_scope()) {
+            passed_through_with = true;
+          } else if (scope->is_catch_scope()) {
+            Variable* var = scope->LookupLocal(name);
+            // If a variable is declared in a catch scope with a masking
+            // catch-declared variable, the initializing assignment is an
+            // assignment to the catch-declared variable instead.
+            // https://tc39.es/ecma262/#sec-variablestatements-in-catch-blocks
+            if (var != nullptr) {
+              result->set_is_assigned();
+              if (passed_through_with) break;
+              result->BindTo(var);
+              var->SetMaybeAssigned();
+              return result;
+            }
+          }
+        }
+        if (passed_through_with) {
+          // If a variable is declared in a with scope, the initializing
+          // assignment might target a with-declared variable instead.
+          parser()->scope()->AddUnresolved(result);
+          return result;
+        }
       }
+      DCHECK_NOT_NULL(var);
+      result->BindTo(var);
     }
     return result;
   }
@@ -145,16 +166,6 @@ class ExpressionScope {
     } while (scope != nullptr);
   }
 
-  void RecordCallsSuper() {
-    ExpressionScope* scope = this;
-    do {
-      if (scope->IsArrowHeadParsingScope()) {
-        scope->AsArrowHeadParsingScope()->RecordCallsSuper();
-      }
-      scope = scope->parent();
-    } while (scope != nullptr);
-  }
-
   void RecordPatternError(const Scanner::Location& loc,
                           MessageTemplate message) {
     // TODO(verwaest): Non-assigning expression?
@@ -206,7 +217,7 @@ class ExpressionScope {
   }
 
   bool IsCertainlyDeclaration() const {
-    return IsInRange(type_, kParameterDeclaration, kLexicalDeclaration);
+    return base::IsInRange(type_, kParameterDeclaration, kLexicalDeclaration);
   }
 
   int SetInitializers(int variable_index, int peek_position) {
@@ -273,14 +284,15 @@ class ExpressionScope {
 #endif
 
   bool CanBeExpression() const {
-    return IsInRange(type_, kExpression, kMaybeAsyncArrowParameterDeclaration);
+    return base::IsInRange(type_, kExpression,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool CanBeDeclaration() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kLexicalDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kLexicalDeclaration);
   }
   bool IsVariableDeclaration() const {
-    return IsInRange(type_, kVarDeclaration, kLexicalDeclaration);
+    return base::IsInRange(type_, kVarDeclaration, kLexicalDeclaration);
   }
   bool IsLexicalDeclaration() const { return type_ == kLexicalDeclaration; }
   bool IsAsyncArrowHeadParsingScope() const {
@@ -309,17 +321,17 @@ class ExpressionScope {
   }
 
   bool IsArrowHeadParsingScope() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kMaybeAsyncArrowParameterDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool IsCertainlyPattern() const { return IsCertainlyDeclaration(); }
   bool CanBeParameterDeclaration() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kParameterDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kParameterDeclaration);
   }
   bool CanBeArrowParameterDeclaration() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kMaybeAsyncArrowParameterDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool IsCertainlyParameterDeclaration() const {
     return type_ == kParameterDeclaration;
@@ -747,13 +759,14 @@ class ArrowHeadParsingScope : public ExpressionParsingScope<Types> {
 
   DeclarationScope* ValidateAndCreateScope() {
     DCHECK(!this->is_verified());
+    DeclarationScope* result = this->parser()->NewFunctionScope(kind());
     if (declaration_error_location.IsValid()) {
       ExpressionScope<Types>::Report(declaration_error_location,
                                      declaration_error_message);
+      return result;
     }
     this->ValidatePattern();
 
-    DeclarationScope* result = this->parser()->NewFunctionScope(kind());
     if (!has_simple_parameter_list_) result->SetHasNonSimpleParameters();
     VariableKind kind = PARAMETER_VARIABLE;
     VariableMode mode =
@@ -774,17 +787,15 @@ class ArrowHeadParsingScope : public ExpressionParsingScope<Types> {
     }
 
 #ifdef DEBUG
-    for (auto declaration : *result->declarations()) {
-      DCHECK_NE(declaration->var()->initializer_position(), kNoSourcePosition);
+    if (!this->has_error()) {
+      for (auto declaration : *result->declarations()) {
+        DCHECK_NE(declaration->var()->initializer_position(),
+                  kNoSourcePosition);
+      }
     }
 #endif  // DEBUG
 
-    if (uses_this_) {
-      result->set_has_this_reference();
-    }
-    if (uses_this_ || calls_super_) {
-      result->GetReceiverScope()->receiver()->ForceContextAllocation();
-    }
+    if (uses_this_) result->UsesThis();
     return result;
   }
 
@@ -797,7 +808,6 @@ class ArrowHeadParsingScope : public ExpressionParsingScope<Types> {
 
   void RecordNonSimpleParameter() { has_simple_parameter_list_ = false; }
   void RecordThisUse() { uses_this_ = true; }
-  void RecordCallsSuper() { calls_super_ = true; }
 
  private:
   FunctionKind kind() const {
@@ -810,7 +820,6 @@ class ArrowHeadParsingScope : public ExpressionParsingScope<Types> {
   MessageTemplate declaration_error_message = MessageTemplate::kNone;
   bool has_simple_parameter_list_ = true;
   bool uses_this_ = false;
-  bool calls_super_ = false;
 
   DISALLOW_COPY_AND_ASSIGN(ArrowHeadParsingScope);
 };

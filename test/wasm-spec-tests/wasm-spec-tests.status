@@ -4,8 +4,8 @@
 
 [
 [ALWAYS, {
-  #TODO(ahaas): Add additional stack checks on mips.
-  'skip-stack-guard-page': [PASS, ['arch == mipsel or arch == mips64el or ((arch == ppc or arch == ppc64 or arch == s390 or arch == s390x) and simulator_run)', SKIP]],
+  'skip-stack-guard-page': [PASS, ['((arch == ppc or arch == ppc64 or arch == s390 or arch == s390x) and simulator_run)', SKIP]],
+
   # TODO(v8:9144): The MVP behavior when bounds-checking segments changed in
   # the bulk-memory proposal. Since we've enabled bulk-memory by default, we
   # need to update to use its testsuite.
@@ -13,23 +13,24 @@
   'binary-leb128': [FAIL],
   'elem': [FAIL],
   'data': [FAIL],
-  # TODO(mstarzinger): Roll newest tests into "js-types" repository.
+
+  # TODO(wasm): Roll newest tests into "js-types" repository.
   'proposals/js-types/exports': [FAIL],
   'proposals/js-types/globals': [FAIL],
   'proposals/js-types/linking': [FAIL],
-  # TODO(v8:9673): Enable these spec tests once they exist, and the out-dated
-  # tests have been removed.
-  'proposals/JS-BigInt-integration/*': [SKIP],
-  # TODO(v8:9865): Throwing behavior changed for these tests.
-  'proposals/bulk-memory-operations/linking': [FAIL],
-  'proposals/bulk-memory-operations/bulk': [FAIL],
-  'proposals/bulk-memory-operations/elem': [FAIL],
-  'proposals/bulk-memory-operations/data': [FAIL],
-  # TODO(thibaudm): Spec tests do not check multi-return functions correctly.
-  'proposals/multi-value/elem': [FAIL],
-  'proposals/multi-value/call': [FAIL],
-  'proposals/multi-value/if': [FAIL],
-  'proposals/multi-value/func': [FAIL],
+
+  # TODO(wasm): Roll newest tests into "tail-call" repository.
+  'proposals/tail-call/data': [FAIL],
+  'proposals/tail-call/elem': [FAIL],
+  'proposals/tail-call/exports': [FAIL],
+  'proposals/tail-call/func': [FAIL],
+  'proposals/tail-call/globals': [FAIL],
+  'proposals/tail-call/imports': [FAIL],
+  'proposals/tail-call/linking': [FAIL],
+  'proposals/tail-call/type': [FAIL],
+
+  # This test requires the reftypes flag to be disabled.
+  'proposals/bulk-memory-operations/imports': [FAIL],
 }],  # ALWAYS
 
 ['arch == mipsel or arch == mips64el or arch == mips or arch == mips64', {
@@ -49,6 +50,19 @@
   'proposals/js-types/float_exprs': [SKIP],
   'proposals/js-types/float_misc': [SKIP],
   'proposals/js-types/conversions': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
+  'proposals/bulk-memory-operations/float_misc': [SKIP],
+  'proposals/reference-types/float_misc': [SKIP],
+  'proposals/tail-call/f32': [SKIP],
+  'proposals/tail-call/f32_bitwise': [SKIP],
+  'proposals/tail-call/f64': [SKIP],
+  'proposals/tail-call/f64_bitwise': [SKIP],
+  'proposals/tail-call/float_exprs': [SKIP],
+  'proposals/tail-call/float_misc': [SKIP],
+  'proposals/tail-call/conversions': [SKIP],
 }],  # 'arch == mipsel or arch == mips64el or arch == mips or arch == mips64'
 
 ['(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simulator_run', {
@@ -57,10 +71,11 @@
   'conversions': [SKIP],
 }],  # '(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simulator_run'
 
-['arch == arm and not simulator_run', {
-  # Too slow on chromebooks.
-  'br_table': [SKIP],
-}],  # 'arch == arm and not simulator_run'
+['(arch == mipsel or arch == mips64el) and simulator_run', {
+  # These tests need larger stack size on simulator.
+  'skip-stack-guard-page': '--sim-stack-size=8192',
+  'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
+}],  # '(arch == mipsel or arch == mips64el) and simulator_run'
 
 ['arch == ppc or arch == ppc64', {
   # These tests fail because ppc float min and max doesn't convert sNaN to qNaN.
@@ -68,11 +83,18 @@
   'f64': [SKIP],
   'proposals/js-types/f32': [SKIP],
   'proposals/js-types/f64': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
+  'proposals/tail-call/f32': [SKIP],
+  'proposals/tail-call/f64': [SKIP],
   # This test fails because ppc float to double doesn't convert sNaN to qNaN.
   'conversions': [SKIP],
-  'proposals/reference-types/conversions':  [SKIP],
-  'proposals/bulk-memory-operations/conversions': [SKIP],
   'proposals/js-types/conversions': [SKIP],
+  'proposals/bulk-memory-operations/conversions': [SKIP],
+  'proposals/reference-types/conversions':  [SKIP],
+  'proposals/tail-call/conversions':  [SKIP],
 }],  # 'arch == ppc or arch == ppc64'
 
 ['arch == s390 or arch == s390x', {
@@ -81,6 +103,12 @@
   'f64': [SKIP],
   'proposals/js-types/f32': [SKIP],
   'proposals/js-types/f64': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
+  'proposals/tail-call/f32': [SKIP],
+  'proposals/tail-call/f64': [SKIP],
 }],  # 'arch == s390 or arch == s390x'
 
 ##############################################################################
@@ -89,5 +117,9 @@
   '*': [SKIP],
 }], # lite_mode or variant == jitless
 
+################################################################################
+['variant == stress_snapshot', {
+  '*': [SKIP],  # only relevant for mjsunit tests.
+}],
 
 ]

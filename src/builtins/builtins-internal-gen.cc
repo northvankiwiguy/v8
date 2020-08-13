@@ -7,7 +7,8 @@
 #include "src/builtins/builtins.h"
 #include "src/codegen/code-stub-assembler.h"
 #include "src/codegen/macro-assembler.h"
-#include "src/heap/heap-inl.h"  // crbug.com/v8/8499
+#include "src/execution/frame-constants.h"
+#include "src/heap/memory-chunk.h"
 #include "src/ic/accessor-assembler.h"
 #include "src/ic/keyed-store-generic.h"
 #include "src/logging/counters.h"
@@ -41,9 +42,8 @@ TF_BUILTIN(CopyFastSmiOrObjectElements, CodeStubAssembler) {
 }
 
 TF_BUILTIN(GrowFastDoubleElements, CodeStubAssembler) {
-  Node* object = Parameter(Descriptor::kObject);
-  Node* key = Parameter(Descriptor::kKey);
-  Node* context = Parameter(Descriptor::kContext);
+  TNode<JSObject> object = CAST(Parameter(Descriptor::kObject));
+  TNode<Smi> key = CAST(Parameter(Descriptor::kKey));
 
   Label runtime(this, Label::kDeferred);
   TNode<FixedArrayBase> elements = LoadElements(object);
@@ -52,13 +52,13 @@ TF_BUILTIN(GrowFastDoubleElements, CodeStubAssembler) {
   Return(elements);
 
   BIND(&runtime);
-  TailCallRuntime(Runtime::kGrowArrayElements, context, object, key);
+  TailCallRuntime(Runtime::kGrowArrayElements, NoContextConstant(), object,
+                  key);
 }
 
 TF_BUILTIN(GrowFastSmiOrObjectElements, CodeStubAssembler) {
-  Node* object = Parameter(Descriptor::kObject);
-  Node* key = Parameter(Descriptor::kKey);
-  Node* context = Parameter(Descriptor::kContext);
+  TNode<JSObject> object = CAST(Parameter(Descriptor::kObject));
+  TNode<Smi> key = CAST(Parameter(Descriptor::kKey));
 
   Label runtime(this, Label::kDeferred);
   TNode<FixedArrayBase> elements = LoadElements(object);
@@ -67,108 +67,13 @@ TF_BUILTIN(GrowFastSmiOrObjectElements, CodeStubAssembler) {
   Return(elements);
 
   BIND(&runtime);
-  TailCallRuntime(Runtime::kGrowArrayElements, context, object, key);
-}
-
-TF_BUILTIN(NewArgumentsElements, CodeStubAssembler) {
-  Node* frame = Parameter(Descriptor::kFrame);
-  TNode<IntPtrT> length = SmiToIntPtr(Parameter(Descriptor::kLength));
-  TNode<IntPtrT> mapped_count =
-      SmiToIntPtr(Parameter(Descriptor::kMappedCount));
-
-  // Check if we can allocate in new space.
-  ElementsKind kind = PACKED_ELEMENTS;
-  int max_elements = FixedArray::GetMaxLengthForNewSpaceAllocation(kind);
-  Label if_newspace(this), if_oldspace(this, Label::kDeferred);
-  Branch(IntPtrLessThan(length, IntPtrConstant(max_elements)), &if_newspace,
-         &if_oldspace);
-
-  BIND(&if_newspace);
-  {
-    // Prefer EmptyFixedArray in case of non-positive {length} (the {length}
-    // can be negative here for rest parameters).
-    Label if_empty(this), if_notempty(this);
-    Branch(IntPtrLessThanOrEqual(length, IntPtrConstant(0)), &if_empty,
-           &if_notempty);
-
-    BIND(&if_empty);
-    Return(EmptyFixedArrayConstant());
-
-    BIND(&if_notempty);
-    {
-      // Allocate a FixedArray in new space.
-      TNode<FixedArray> result = CAST(AllocateFixedArray(kind, length));
-
-      // The elements might be used to back mapped arguments. In that case fill
-      // the mapped elements (i.e. the first {mapped_count}) with the hole, but
-      // make sure not to overshoot the {length} if some arguments are missing.
-      TNode<IntPtrT> number_of_holes = IntPtrMin(mapped_count, length);
-      TNode<Oddball> the_hole = TheHoleConstant();
-
-      // Fill the first elements up to {number_of_holes} with the hole.
-      TVARIABLE(IntPtrT, var_index, IntPtrConstant(0));
-      Label loop1(this, &var_index), done_loop1(this);
-      Goto(&loop1);
-      BIND(&loop1);
-      {
-        // Load the current {index}.
-        TNode<IntPtrT> index = var_index.value();
-
-        // Check if we are done.
-        GotoIf(IntPtrEqual(index, number_of_holes), &done_loop1);
-
-        // Store the hole into the {result}.
-        StoreFixedArrayElement(result, index, the_hole, SKIP_WRITE_BARRIER);
-
-        // Continue with next {index}.
-        var_index = IntPtrAdd(index, IntPtrConstant(1));
-        Goto(&loop1);
-      }
-      BIND(&done_loop1);
-
-      // Compute the effective {offset} into the {frame}.
-      TNode<IntPtrT> offset = IntPtrAdd(length, IntPtrConstant(1));
-
-      // Copy the parameters from {frame} (starting at {offset}) to {result}.
-      Label loop2(this, &var_index), done_loop2(this);
-      Goto(&loop2);
-      BIND(&loop2);
-      {
-        // Load the current {index}.
-        TNode<IntPtrT> index = var_index.value();
-
-        // Check if we are done.
-        GotoIf(IntPtrEqual(index, length), &done_loop2);
-
-        // Load the parameter at the given {index}.
-        TNode<Object> value = BitcastWordToTagged(
-            Load(MachineType::Pointer(), frame,
-                 TimesSystemPointerSize(IntPtrSub(offset, index))));
-
-        // Store the {value} into the {result}.
-        StoreFixedArrayElement(result, index, value, SKIP_WRITE_BARRIER);
-
-        // Continue with next {index}.
-        var_index = IntPtrAdd(index, IntPtrConstant(1));
-        Goto(&loop2);
-      }
-      BIND(&done_loop2);
-
-      Return(result);
-    }
-  }
-
-  BIND(&if_oldspace);
-  {
-    // Allocate in old space (or large object space).
-    TailCallRuntime(Runtime::kNewArgumentsElements, NoContextConstant(),
-                    BitcastWordToTagged(frame), SmiFromIntPtr(length),
-                    SmiFromIntPtr(mapped_count));
-  }
+  TailCallRuntime(Runtime::kGrowArrayElements, NoContextConstant(), object,
+                  key);
 }
 
 TF_BUILTIN(ReturnReceiver, CodeStubAssembler) {
-  Return(Parameter(Descriptor::kReceiver));
+  TNode<Object> receiver = CAST(Parameter(Descriptor::kReceiver));
+  Return(receiver);
 }
 
 TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
@@ -211,51 +116,51 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
   explicit RecordWriteCodeStubAssembler(compiler::CodeAssemblerState* state)
       : CodeStubAssembler(state) {}
 
-  Node* IsMarking() {
+  TNode<BoolT> IsMarking() {
     TNode<ExternalReference> is_marking_addr = ExternalConstant(
         ExternalReference::heap_is_marking_flag_address(this->isolate()));
-    return Load(MachineType::Uint8(), is_marking_addr);
+    return Word32NotEqual(Load<Uint8T>(is_marking_addr), Int32Constant(0));
   }
 
   TNode<BoolT> IsPageFlagSet(TNode<IntPtrT> object, int mask) {
     TNode<IntPtrT> page = PageFromAddress(object);
-    TNode<IntPtrT> flags =
-        UncheckedCast<IntPtrT>(Load(MachineType::Pointer(), page,
-                                    IntPtrConstant(MemoryChunk::kFlagsOffset)));
+    TNode<IntPtrT> flags = UncheckedCast<IntPtrT>(
+        Load(MachineType::Pointer(), page,
+             IntPtrConstant(BasicMemoryChunk::kFlagsOffset)));
     return WordNotEqual(WordAnd(flags, IntPtrConstant(mask)),
                         IntPtrConstant(0));
   }
 
   TNode<BoolT> IsWhite(TNode<IntPtrT> object) {
     DCHECK_EQ(strcmp(Marking::kWhiteBitPattern, "00"), 0);
-    Node* cell;
-    Node* mask;
+    TNode<IntPtrT> cell;
+    TNode<IntPtrT> mask;
     GetMarkBit(object, &cell, &mask);
-    mask = TruncateIntPtrToInt32(mask);
+    TNode<Int32T> mask32 = TruncateIntPtrToInt32(mask);
     // Non-white has 1 for the first bit, so we only need to check for the first
     // bit.
-    return Word32Equal(Word32And(Load(MachineType::Int32(), cell), mask),
-                       Int32Constant(0));
+    return Word32Equal(Word32And(Load<Int32T>(cell), mask32), Int32Constant(0));
   }
 
-  void GetMarkBit(TNode<IntPtrT> object, Node** cell, Node** mask) {
+  void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
+                  TNode<IntPtrT>* mask) {
     TNode<IntPtrT> page = PageFromAddress(object);
-    Node* bitmap = Load(MachineType::Pointer(), page,
-                        IntPtrConstant(MemoryChunk::kMarkBitmapOffset));
+    TNode<IntPtrT> bitmap =
+        IntPtrAdd(page, IntPtrConstant(MemoryChunk::kMarkingBitmapOffset));
 
     {
       // Temp variable to calculate cell offset in bitmap.
-      Node* r0;
+      TNode<WordT> r0;
       int shift = Bitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
                   Bitmap::kBytesPerCellLog2;
       r0 = WordShr(object, IntPtrConstant(shift));
       r0 = WordAnd(r0, IntPtrConstant((kPageAlignmentMask >> shift) &
                                       ~(Bitmap::kBytesPerCell - 1)));
-      *cell = IntPtrAdd(bitmap, r0);
+      *cell = IntPtrAdd(bitmap, Signed(r0));
     }
     {
       // Temp variable to calculate bit offset in cell.
-      Node* r1;
+      TNode<WordT> r1;
       r1 = WordShr(object, IntPtrConstant(kTaggedSizeLog2));
       r1 = WordAnd(r1, IntPtrConstant((1 << Bitmap::kBitsPerCellLog2) - 1));
       // It seems that LSB(e.g. cl) is automatically used, so no manual masking
@@ -265,83 +170,88 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
     }
   }
 
-  Node* ShouldSkipFPRegs(SloppyTNode<Object> mode) {
+  TNode<BoolT> ShouldSkipFPRegs(TNode<Smi> mode) {
     return TaggedEqual(mode, SmiConstant(kDontSaveFPRegs));
   }
 
-  Node* ShouldEmitRememberSet(SloppyTNode<Object> remembered_set) {
+  TNode<BoolT> ShouldEmitRememberSet(TNode<Smi> remembered_set) {
     return TaggedEqual(remembered_set, SmiConstant(EMIT_REMEMBERED_SET));
   }
 
+  template <typename Ret, typename Arg0, typename Arg1>
   void CallCFunction2WithCallerSavedRegistersMode(
-      MachineType return_type, MachineType arg0_type, MachineType arg1_type,
-      Node* function, Node* arg0, Node* arg1, Node* mode, Label* next) {
+      TNode<ExternalReference> function, TNode<Arg0> arg0, TNode<Arg1> arg1,
+      TNode<Smi> mode, Label* next) {
     Label dont_save_fp(this), save_fp(this);
     Branch(ShouldSkipFPRegs(mode), &dont_save_fp, &save_fp);
     BIND(&dont_save_fp);
     {
       CallCFunctionWithCallerSavedRegisters(
-          function, return_type, kDontSaveFPRegs,
-          std::make_pair(arg0_type, arg0), std::make_pair(arg1_type, arg1));
+          function, MachineTypeOf<Ret>::value, kDontSaveFPRegs,
+          std::make_pair(MachineTypeOf<Arg0>::value, arg0),
+          std::make_pair(MachineTypeOf<Arg1>::value, arg1));
       Goto(next);
     }
 
     BIND(&save_fp);
     {
-      CallCFunctionWithCallerSavedRegisters(function, return_type, kSaveFPRegs,
-                                            std::make_pair(arg0_type, arg0),
-                                            std::make_pair(arg1_type, arg1));
+      CallCFunctionWithCallerSavedRegisters(
+          function, MachineTypeOf<Ret>::value, kSaveFPRegs,
+          std::make_pair(MachineTypeOf<Arg0>::value, arg0),
+          std::make_pair(MachineTypeOf<Arg1>::value, arg1));
       Goto(next);
     }
   }
 
+  template <typename Ret, typename Arg0, typename Arg1, typename Arg2>
   void CallCFunction3WithCallerSavedRegistersMode(
-      MachineType return_type, MachineType arg0_type, MachineType arg1_type,
-      MachineType arg2_type, Node* function, Node* arg0, Node* arg1, Node* arg2,
-      Node* mode, Label* next) {
+      TNode<ExternalReference> function, TNode<Arg0> arg0, TNode<Arg1> arg1,
+      TNode<Arg2> arg2, TNode<Smi> mode, Label* next) {
     Label dont_save_fp(this), save_fp(this);
     Branch(ShouldSkipFPRegs(mode), &dont_save_fp, &save_fp);
     BIND(&dont_save_fp);
     {
       CallCFunctionWithCallerSavedRegisters(
-          function, return_type, kDontSaveFPRegs,
-          std::make_pair(arg0_type, arg0), std::make_pair(arg1_type, arg1),
-          std::make_pair(arg2_type, arg2));
+          function, MachineTypeOf<Ret>::value, kDontSaveFPRegs,
+          std::make_pair(MachineTypeOf<Arg0>::value, arg0),
+          std::make_pair(MachineTypeOf<Arg1>::value, arg1),
+          std::make_pair(MachineTypeOf<Arg2>::value, arg2));
       Goto(next);
     }
 
     BIND(&save_fp);
     {
       CallCFunctionWithCallerSavedRegisters(
-          function, return_type, kSaveFPRegs, std::make_pair(arg0_type, arg0),
-          std::make_pair(arg1_type, arg1), std::make_pair(arg2_type, arg2));
+          function, MachineTypeOf<Ret>::value, kSaveFPRegs,
+          std::make_pair(MachineTypeOf<Arg0>::value, arg0),
+          std::make_pair(MachineTypeOf<Arg1>::value, arg1),
+          std::make_pair(MachineTypeOf<Arg2>::value, arg2));
       Goto(next);
     }
   }
 
   void InsertIntoRememberedSetAndGotoSlow(TNode<IntPtrT> object,
-                                          TNode<IntPtrT> slot, Node* mode,
+                                          TNode<IntPtrT> slot, TNode<Smi> mode,
                                           Label* next) {
     TNode<IntPtrT> page = PageFromAddress(object);
     TNode<ExternalReference> function =
         ExternalConstant(ExternalReference::insert_remembered_set_function());
-    CallCFunction2WithCallerSavedRegistersMode(
-        MachineType::Int32(), MachineType::Pointer(), MachineType::Pointer(),
+    CallCFunction2WithCallerSavedRegistersMode<Int32T, IntPtrT, IntPtrT>(
         function, page, slot, mode, next);
   }
 
   void InsertIntoRememberedSetAndGoto(TNode<IntPtrT> object,
-                                      TNode<IntPtrT> slot, Node* mode,
+                                      TNode<IntPtrT> slot, TNode<Smi> mode,
                                       Label* next) {
     Label slow_path(this);
     TNode<IntPtrT> page = PageFromAddress(object);
 
     // Load address of SlotSet
-    TNode<IntPtrT> slot_set_array = LoadSlotSetArray(page, &slow_path);
+    TNode<IntPtrT> slot_set = LoadSlotSet(page, &slow_path);
     TNode<IntPtrT> slot_offset = IntPtrSub(slot, page);
 
     // Load bucket
-    TNode<IntPtrT> bucket = LoadBucket(slot_set_array, slot_offset, &slow_path);
+    TNode<IntPtrT> bucket = LoadBucket(slot_set, slot_offset, &slow_path);
 
     // Update cell
     SetBitInCell(bucket, slot_offset);
@@ -352,23 +262,21 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
     InsertIntoRememberedSetAndGotoSlow(object, slot, mode, next);
   }
 
-  TNode<IntPtrT> LoadSlotSetArray(TNode<IntPtrT> page, Label* slow_path) {
-    TNode<IntPtrT> slot_set_array = UncheckedCast<IntPtrT>(
+  TNode<IntPtrT> LoadSlotSet(TNode<IntPtrT> page, Label* slow_path) {
+    TNode<IntPtrT> slot_set = UncheckedCast<IntPtrT>(
         Load(MachineType::Pointer(), page,
              IntPtrConstant(MemoryChunk::kOldToNewSlotSetOffset)));
-    GotoIf(WordEqual(slot_set_array, IntPtrConstant(0)), slow_path);
+    GotoIf(WordEqual(slot_set, IntPtrConstant(0)), slow_path);
 
-    return slot_set_array;
+    return slot_set;
   }
 
-  TNode<IntPtrT> LoadBucket(TNode<IntPtrT> slot_set_array,
-                            TNode<WordT> slot_offset, Label* slow_path) {
-    // Assume here that SlotSet only contains of buckets
-    DCHECK_EQ(SlotSet::kSize, SlotSet::kBuckets * sizeof(SlotSet::Bucket));
+  TNode<IntPtrT> LoadBucket(TNode<IntPtrT> slot_set, TNode<WordT> slot_offset,
+                            Label* slow_path) {
     TNode<WordT> bucket_index =
         WordShr(slot_offset, SlotSet::kBitsPerBucketLog2 + kTaggedSizeLog2);
     TNode<IntPtrT> bucket = UncheckedCast<IntPtrT>(
-        Load(MachineType::Pointer(), slot_set_array,
+        Load(MachineType::Pointer(), slot_set,
              WordShl(bucket_index, kSystemPointerSizeLog2)));
     GotoIf(WordEqual(bucket, IntPtrConstant(0)), slow_path);
     return bucket;
@@ -403,7 +311,8 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
   Label incremental_wb(this);
   Label exit(this);
 
-  Node* remembered_set = Parameter(Descriptor::kRememberedSet);
+  TNode<Smi> remembered_set =
+      UncheckedCast<Smi>(Parameter(Descriptor::kRememberedSet));
   Branch(ShouldEmitRememberSet(remembered_set), &generational_wb,
          &incremental_wb);
 
@@ -442,7 +351,7 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
 
     BIND(&store_buffer_exit);
     {
-      Node* fp_mode = Parameter(Descriptor::kFPMode);
+      TNode<Smi> fp_mode = UncheckedCast<Smi>(Parameter(Descriptor::kFPMode));
       TNode<IntPtrT> object =
           BitcastTaggedToWord(Parameter(Descriptor::kObject));
       InsertIntoRememberedSetAndGoto(object, slot, fp_mode, &exit);
@@ -450,7 +359,7 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
 
     BIND(&store_buffer_incremental_wb);
     {
-      Node* fp_mode = Parameter(Descriptor::kFPMode);
+      TNode<Smi> fp_mode = UncheckedCast<Smi>(Parameter(Descriptor::kFPMode));
       TNode<IntPtrT> object =
           BitcastTaggedToWord(Parameter(Descriptor::kObject));
       InsertIntoRememberedSetAndGoto(object, slot, fp_mode, &incremental_wb);
@@ -482,16 +391,12 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
     BIND(&call_incremental_wb);
     {
       TNode<ExternalReference> function = ExternalConstant(
-          ExternalReference::incremental_marking_record_write_function());
-      TNode<ExternalReference> isolate_constant =
-          ExternalConstant(ExternalReference::isolate_address(isolate()));
-      Node* fp_mode = Parameter(Descriptor::kFPMode);
+          ExternalReference::write_barrier_marking_from_code_function());
+      TNode<Smi> fp_mode = UncheckedCast<Smi>(Parameter(Descriptor::kFPMode));
       TNode<IntPtrT> object =
           BitcastTaggedToWord(Parameter(Descriptor::kObject));
-      CallCFunction3WithCallerSavedRegistersMode(
-          MachineType::Int32(), MachineType::Pointer(), MachineType::Pointer(),
-          MachineType::Pointer(), function, object, slot, isolate_constant,
-          fp_mode, &exit);
+      CallCFunction2WithCallerSavedRegistersMode<Int32T, IntPtrT, IntPtrT>(
+          function, object, slot, fp_mode, &exit);
     }
   }
 
@@ -507,13 +412,13 @@ TF_BUILTIN(EphemeronKeyBarrier, RecordWriteCodeStubAssembler) {
       ExternalReference::ephemeron_key_write_barrier_function());
   TNode<ExternalReference> isolate_constant =
       ExternalConstant(ExternalReference::isolate_address(isolate()));
-  Node* address = Parameter(Descriptor::kSlotAddress);
+  TNode<IntPtrT> address =
+      UncheckedCast<IntPtrT>(Parameter(Descriptor::kSlotAddress));
   TNode<IntPtrT> object = BitcastTaggedToWord(Parameter(Descriptor::kObject));
-  Node* fp_mode = Parameter(Descriptor::kFPMode);
-  CallCFunction3WithCallerSavedRegistersMode(
-      MachineType::Int32(), MachineType::Pointer(), MachineType::Pointer(),
-      MachineType::Pointer(), function, object, address, isolate_constant,
-      fp_mode, &exit);
+  TNode<Smi> fp_mode = UncheckedCast<Smi>(Parameter(Descriptor::kFPMode));
+  CallCFunction3WithCallerSavedRegistersMode<Int32T, IntPtrT, IntPtrT,
+                                             ExternalReference>(
+      function, object, address, isolate_constant, fp_mode, &exit);
 
   BIND(&exit);
   IncrementCounter(isolate()->counters()->write_barriers(), 1);
@@ -536,8 +441,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
 
     BIND(&dictionary_found);
     TNode<IntPtrT> key_index = var_name_index.value();
-    TNode<Uint32T> details =
-        LoadDetailsByKeyIndex<NameDictionary>(properties, key_index);
+    TNode<Uint32T> details = LoadDetailsByKeyIndex(properties, key_index);
     GotoIf(IsSetWord32(details, PropertyDetails::kAttributesDontDeleteMask),
            dont_delete);
     // Overwrite the entry itself (see NameDictionary::SetEntry).
@@ -763,7 +667,7 @@ TF_BUILTIN(SetDataProperties, SetOrCopyDataPropertiesAssembler) {
 }
 
 TF_BUILTIN(ForInEnumerate, CodeStubAssembler) {
-  TNode<HeapObject> receiver = CAST(Parameter(Descriptor::kReceiver));
+  TNode<JSReceiver> receiver = CAST(Parameter(Descriptor::kReceiver));
   TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
   Label if_empty(this), if_runtime(this, Label::kDeferred);
@@ -778,11 +682,9 @@ TF_BUILTIN(ForInEnumerate, CodeStubAssembler) {
 }
 
 TF_BUILTIN(ForInFilter, CodeStubAssembler) {
-  Node* key = Parameter(Descriptor::kKey);
-  Node* object = Parameter(Descriptor::kObject);
-  Node* context = Parameter(Descriptor::kContext);
-
-  CSA_ASSERT(this, IsString(key));
+  TNode<String> key = CAST(Parameter(Descriptor::kKey));
+  TNode<HeapObject> object = CAST(Parameter(Descriptor::kObject));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
   Label if_true(this), if_false(this);
   TNode<Oddball> result = HasProperty(context, object, key, kForInHasProperty);
@@ -796,8 +698,8 @@ TF_BUILTIN(ForInFilter, CodeStubAssembler) {
 }
 
 TF_BUILTIN(SameValue, CodeStubAssembler) {
-  Node* lhs = Parameter(Descriptor::kLeft);
-  Node* rhs = Parameter(Descriptor::kRight);
+  TNode<Object> lhs = CAST(Parameter(Descriptor::kLeft));
+  TNode<Object> rhs = CAST(Parameter(Descriptor::kRight));
 
   Label if_true(this), if_false(this);
   BranchIfSameValue(lhs, rhs, &if_true, &if_false);
@@ -810,8 +712,8 @@ TF_BUILTIN(SameValue, CodeStubAssembler) {
 }
 
 TF_BUILTIN(SameValueNumbersOnly, CodeStubAssembler) {
-  Node* lhs = Parameter(Descriptor::kLeft);
-  Node* rhs = Parameter(Descriptor::kRight);
+  TNode<Object> lhs = CAST(Parameter(Descriptor::kLeft));
+  TNode<Object> rhs = CAST(Parameter(Descriptor::kRight));
 
   Label if_true(this), if_false(this);
   BranchIfSameValue(lhs, rhs, &if_true, &if_false, SameValueMode::kNumbersOnly);
@@ -986,31 +888,31 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
 
 // ES6 [[Get]] operation.
 TF_BUILTIN(GetProperty, CodeStubAssembler) {
-  Node* object = Parameter(Descriptor::kObject);
-  Node* key = Parameter(Descriptor::kKey);
-  Node* context = Parameter(Descriptor::kContext);
+  TNode<Object> object = CAST(Parameter(Descriptor::kObject));
+  TNode<Object> key = CAST(Parameter(Descriptor::kKey));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
   // TODO(duongn): consider tailcalling to GetPropertyWithReceiver(object,
   // object, key, OnNonExistent::kReturnUndefined).
   Label if_notfound(this), if_proxy(this, Label::kDeferred),
       if_slow(this, Label::kDeferred);
 
-  CodeStubAssembler::LookupInHolder lookup_property_in_holder =
-      [=](Node* receiver, Node* holder, Node* holder_map,
-          Node* holder_instance_type, Node* unique_name, Label* next_holder,
-          Label* if_bailout) {
-        VARIABLE(var_value, MachineRepresentation::kTagged);
+  CodeStubAssembler::LookupPropertyInHolder lookup_property_in_holder =
+      [=](TNode<HeapObject> receiver, TNode<HeapObject> holder,
+          TNode<Map> holder_map, TNode<Int32T> holder_instance_type,
+          TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
+        TVARIABLE(Object, var_value);
         Label if_found(this);
-        TryGetOwnProperty(context, receiver, holder, holder_map,
+        TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
                           &var_value, next_holder, if_bailout);
         BIND(&if_found);
         Return(var_value.value());
       };
 
-  CodeStubAssembler::LookupInHolder lookup_element_in_holder =
-      [=](Node* receiver, Node* holder, Node* holder_map,
-          Node* holder_instance_type, Node* index, Label* next_holder,
-          Label* if_bailout) {
+  CodeStubAssembler::LookupElementInHolder lookup_element_in_holder =
+      [=](TNode<HeapObject> receiver, TNode<HeapObject> holder,
+          TNode<Map> holder_map, TNode<Int32T> holder_instance_type,
+          TNode<IntPtrT> index, Label* next_holder, Label* if_bailout) {
         // Not supported yet.
         Use(next_holder);
         Goto(if_bailout);
@@ -1041,31 +943,31 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
 
 // ES6 [[Get]] operation with Receiver.
 TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
-  Node* object = Parameter(Descriptor::kObject);
-  Node* key = Parameter(Descriptor::kKey);
-  Node* context = Parameter(Descriptor::kContext);
-  Node* receiver = Parameter(Descriptor::kReceiver);
+  TNode<Object> object = CAST(Parameter(Descriptor::kObject));
+  TNode<Object> key = CAST(Parameter(Descriptor::kKey));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+  TNode<Object> receiver = CAST(Parameter(Descriptor::kReceiver));
   TNode<Object> on_non_existent = CAST(Parameter(Descriptor::kOnNonExistent));
   Label if_notfound(this), if_proxy(this, Label::kDeferred),
       if_slow(this, Label::kDeferred);
 
-  CodeStubAssembler::LookupInHolder lookup_property_in_holder =
-      [=](Node* receiver, Node* holder, Node* holder_map,
-          Node* holder_instance_type, Node* unique_name, Label* next_holder,
-          Label* if_bailout) {
-        VARIABLE(var_value, MachineRepresentation::kTagged);
+  CodeStubAssembler::LookupPropertyInHolder lookup_property_in_holder =
+      [=](TNode<HeapObject> receiver, TNode<HeapObject> holder,
+          TNode<Map> holder_map, TNode<Int32T> holder_instance_type,
+          TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
+        TVARIABLE(Object, var_value);
         Label if_found(this);
-        TryGetOwnProperty(context, receiver, holder, holder_map,
+        TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
                           &var_value, next_holder, if_bailout);
         BIND(&if_found);
         Return(var_value.value());
       };
 
-  CodeStubAssembler::LookupInHolder lookup_element_in_holder =
-      [=](Node* receiver, Node* holder, Node* holder_map,
-          Node* holder_instance_type, Node* index, Label* next_holder,
-          Label* if_bailout) {
+  CodeStubAssembler::LookupElementInHolder lookup_element_in_holder =
+      [=](TNode<HeapObject> receiver, TNode<HeapObject> holder,
+          TNode<Map> holder_map, TNode<Int32T> holder_instance_type,
+          TNode<IntPtrT> index, Label* next_holder, Label* if_bailout) {
         // Not supported yet.
         Use(next_holder);
         Goto(if_bailout);
@@ -1130,6 +1032,34 @@ TF_BUILTIN(SetPropertyInLiteral, CodeStubAssembler) {
 
   KeyedStoreGenericGenerator::SetPropertyInLiteral(state(), context, receiver,
                                                    key, value);
+}
+
+TF_BUILTIN(InstantiateAsmJs, CodeStubAssembler) {
+  Label tailcall_to_function(this);
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+  TNode<Object> new_target = CAST(Parameter(Descriptor::kNewTarget));
+  TNode<Int32T> arg_count =
+      UncheckedCast<Int32T>(Parameter(Descriptor::kActualArgumentsCount));
+  TNode<JSFunction> function = CAST(Parameter(Descriptor::kTarget));
+
+  // Retrieve arguments from caller (stdlib, foreign, heap).
+  CodeStubArguments args(this, arg_count);
+  TNode<Object> stdlib = args.GetOptionalArgumentValue(0);
+  TNode<Object> foreign = args.GetOptionalArgumentValue(1);
+  TNode<Object> heap = args.GetOptionalArgumentValue(2);
+
+  // Call runtime, on success just pass the result to the caller and pop all
+  // arguments. A smi 0 is returned on failure, an object on success.
+  TNode<Object> maybe_result_or_smi_zero = CallRuntime(
+      Runtime::kInstantiateAsmJs, context, function, stdlib, foreign, heap);
+  GotoIf(TaggedIsSmi(maybe_result_or_smi_zero), &tailcall_to_function);
+  args.PopAndReturn(maybe_result_or_smi_zero);
+
+  BIND(&tailcall_to_function);
+  // On failure, tail call back to regular JavaScript by re-calling the given
+  // function which has been reset to the compile lazy builtin.
+  TNode<Code> code = CAST(LoadObjectField(function, JSFunction::kCodeOffset));
+  TailCallJSCode(code, context, function, new_target, arg_count);
 }
 
 }  // namespace internal

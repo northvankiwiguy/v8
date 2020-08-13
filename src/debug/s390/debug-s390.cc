@@ -38,14 +38,13 @@ void DebugCodegen::GenerateFrameDropperTrampoline(MacroAssembler* masm) {
   __ LoadRR(fp, r3);
   __ LoadP(r3, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
   __ LeaveFrame(StackFrame::INTERNAL);
-  __ LoadP(r2, FieldMemOperand(r3, JSFunction::kSharedFunctionInfoOffset));
+  __ LoadTaggedPointerField(
+      r2, FieldMemOperand(r3, JSFunction::kSharedFunctionInfoOffset));
   __ LoadLogicalHalfWordP(
       r2, FieldMemOperand(r2, SharedFunctionInfo::kFormalParameterCountOffset));
   __ LoadRR(r4, r2);
 
-  ParameterCount dummy1(r4);
-  ParameterCount dummy2(r2);
-  __ InvokeFunction(r3, dummy1, dummy2, JUMP_FUNCTION);
+  __ InvokeFunction(r3, r4, r2, JUMP_FUNCTION);
 }
 
 const bool LiveEdit::kFrameDropperSupported = true;

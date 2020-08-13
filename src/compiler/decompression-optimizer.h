@@ -22,9 +22,7 @@ class Graph;
 // AnyTagged (since TaggedSigned avoids full decompression always), and
 // HeapConstants.
 
-// DecompressionOptimizer will run only when pointer compression is enabled. For
-// the moment, it's also requires FLAG_turbo_decompression_elimination to be
-// disabled. This flag is only temporary to test out the implementation.
+// DecompressionOptimizer will run only when pointer compression is enabled.
 
 // The phase needs to be run when Machine are present in the graph, i.e
 // at the very end of the pipeline. Also, since this phase may change
@@ -63,6 +61,9 @@ class V8_EXPORT_PRIVATE DecompressionOptimizer final {
   // Change node's op from HeapConstant to CompressedHeapConstant.
   void ChangeHeapConstant(Node* const node);
 
+  // Change the phi's representation from Tagged to Compressed.
+  void ChangePhi(Node* const node);
+
   // Change node's load into a compressed one.
   void ChangeLoad(Node* const node);
 
@@ -91,6 +92,10 @@ class V8_EXPORT_PRIVATE DecompressionOptimizer final {
 
   bool IsEverythingObserved(Node* const node) {
     return states_.Get(node) == State::kEverythingObserved;
+  }
+
+  bool IsOnly32BitsObserved(Node* const node) {
+    return states_.Get(node) == State::kOnly32BitsObserved;
   }
 
   Graph* graph() const { return graph_; }

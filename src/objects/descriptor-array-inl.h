@@ -24,12 +24,9 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(DescriptorArray, HeapObject)
+TQ_OBJECT_CONSTRUCTORS_IMPL(DescriptorArray)
 TQ_OBJECT_CONSTRUCTORS_IMPL(EnumCache)
 
-CAST_ACCESSOR(DescriptorArray)
-
-ACCESSORS(DescriptorArray, enum_cache, EnumCache, kEnumCacheOffset)
 RELAXED_INT16_ACCESSORS(DescriptorArray, number_of_all_descriptors,
                         kNumberOfAllDescriptorsOffset)
 RELAXED_INT16_ACCESSORS(DescriptorArray, number_of_descriptors,
@@ -58,17 +55,19 @@ void DescriptorArray::CopyEnumCacheFrom(DescriptorArray array) {
   set_enum_cache(array.enum_cache());
 }
 
-InternalIndex DescriptorArray::Search(Name name, int valid_descriptors) {
+InternalIndex DescriptorArray::Search(Name name, int valid_descriptors,
+                                      bool concurrent_search) {
   DCHECK(name.IsUniqueName());
-  return InternalIndex(
-      internal::Search<VALID_ENTRIES>(this, name, valid_descriptors, nullptr));
+  return InternalIndex(internal::Search<VALID_ENTRIES>(
+      this, name, valid_descriptors, nullptr, concurrent_search));
 }
 
-InternalIndex DescriptorArray::Search(Name name, Map map) {
+InternalIndex DescriptorArray::Search(Name name, Map map,
+                                      bool concurrent_search) {
   DCHECK(name.IsUniqueName());
   int number_of_own_descriptors = map.NumberOfOwnDescriptors();
   if (number_of_own_descriptors == 0) return InternalIndex::NotFound();
-  return Search(name, number_of_own_descriptors);
+  return Search(name, number_of_own_descriptors, concurrent_search);
 }
 
 InternalIndex DescriptorArray::SearchWithCache(Isolate* isolate, Name name,
@@ -105,11 +104,11 @@ ObjectSlot DescriptorArray::GetDescriptorSlot(int descriptor) {
 }
 
 Name DescriptorArray::GetKey(InternalIndex descriptor_number) const {
-  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  const Isolate* isolate = GetIsolateForPtrCompr(*this);
   return GetKey(isolate, descriptor_number);
 }
 
-Name DescriptorArray::GetKey(Isolate* isolate,
+Name DescriptorArray::GetKey(const Isolate* isolate,
                              InternalIndex descriptor_number) const {
   DCHECK_LT(descriptor_number.as_int(), number_of_descriptors());
   int entry_offset = OffsetOfDescriptorAt(descriptor_number.as_int());
@@ -128,11 +127,12 @@ int DescriptorArray::GetSortedKeyIndex(int descriptor_number) {
 }
 
 Name DescriptorArray::GetSortedKey(int descriptor_number) {
-  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  const Isolate* isolate = GetIsolateForPtrCompr(*this);
   return GetSortedKey(isolate, descriptor_number);
 }
 
-Name DescriptorArray::GetSortedKey(Isolate* isolate, int descriptor_number) {
+Name DescriptorArray::GetSortedKey(const Isolate* isolate,
+                                   int descriptor_number) {
   return GetKey(isolate, InternalIndex(GetSortedKeyIndex(descriptor_number)));
 }
 
@@ -142,11 +142,11 @@ void DescriptorArray::SetSortedKey(int descriptor_number, int pointer) {
 }
 
 Object DescriptorArray::GetStrongValue(InternalIndex descriptor_number) {
-  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  const Isolate* isolate = GetIsolateForPtrCompr(*this);
   return GetStrongValue(isolate, descriptor_number);
 }
 
-Object DescriptorArray::GetStrongValue(Isolate* isolate,
+Object DescriptorArray::GetStrongValue(const Isolate* isolate,
                                        InternalIndex descriptor_number) {
   return GetValue(isolate, descriptor_number).cast<Object>();
 }
@@ -160,11 +160,11 @@ void DescriptorArray::SetValue(InternalIndex descriptor_number,
 }
 
 MaybeObject DescriptorArray::GetValue(InternalIndex descriptor_number) {
-  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  const Isolate* isolate = GetIsolateForPtrCompr(*this);
   return GetValue(isolate, descriptor_number);
 }
 
-MaybeObject DescriptorArray::GetValue(Isolate* isolate,
+MaybeObject DescriptorArray::GetValue(const Isolate* isolate,
                                       InternalIndex descriptor_number) {
   DCHECK_LT(descriptor_number.as_int(), number_of_descriptors());
   int entry_offset = OffsetOfDescriptorAt(descriptor_number.as_int());
@@ -191,11 +191,11 @@ int DescriptorArray::GetFieldIndex(InternalIndex descriptor_number) {
 }
 
 FieldType DescriptorArray::GetFieldType(InternalIndex descriptor_number) {
-  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  const Isolate* isolate = GetIsolateForPtrCompr(*this);
   return GetFieldType(isolate, descriptor_number);
 }
 
-FieldType DescriptorArray::GetFieldType(Isolate* isolate,
+FieldType DescriptorArray::GetFieldType(const Isolate* isolate,
                                         InternalIndex descriptor_number) {
   DCHECK_EQ(GetDetails(descriptor_number).location(), kField);
   MaybeObject wrapped_type = GetValue(isolate, descriptor_number);

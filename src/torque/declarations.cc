@@ -39,16 +39,16 @@ void CheckAlreadyDeclared(const std::string& name, const char* new_type) {
       FilterDeclarables<T>(Declarations::TryLookupShallow(QualifiedName(name)));
   if (!declarations.empty()) {
     Scope* scope = CurrentScope::Get();
-    ReportError("cannot redeclare ", name, " (type ", new_type, scope, ")");
+    ReportError("cannot redeclare ", name, " (type ", *new_type, scope, ")");
   }
 }
 
 }  // namespace
 
 std::vector<Declarable*> Declarations::LookupGlobalScope(
-    const std::string& name) {
+    const QualifiedName& name) {
   std::vector<Declarable*> d =
-      GlobalContext::GetDefaultNamespace()->Lookup(QualifiedName(name));
+      GlobalContext::GetDefaultNamespace()->Lookup(name);
   if (d.empty()) {
     std::stringstream s;
     s << "cannot find \"" << name << "\" in global scope";
@@ -76,7 +76,14 @@ const Type* Declarations::LookupType(const Identifier* name) {
   return alias->type();
 }
 
-const Type* Declarations::LookupGlobalType(const std::string& name) {
+base::Optional<const Type*> Declarations::TryLookupType(
+    const QualifiedName& name) {
+  auto decls = FilterDeclarables<TypeAlias>(TryLookup(name));
+  if (decls.empty()) return base::nullopt;
+  return EnsureUnique(std::move(decls), name, "type")->type();
+}
+
+const Type* Declarations::LookupGlobalType(const QualifiedName& name) {
   TypeAlias* declaration = EnsureUnique(
       FilterDeclarables<TypeAlias>(LookupGlobalScope(name)), name, "type");
   return declaration->type();
@@ -137,6 +144,13 @@ GenericType* Declarations::LookupUniqueGenericType(const QualifiedName& name) {
                       "generic type");
 }
 
+GenericType* Declarations::LookupGlobalUniqueGenericType(
+    const std::string& name) {
+  return EnsureUnique(
+      FilterDeclarables<GenericType>(LookupGlobalScope(QualifiedName(name))),
+      name, "generic type");
+}
+
 base::Optional<GenericType*> Declarations::TryLookupGenericType(
     const QualifiedName& name) {
   std::vector<GenericType*> results = TryLookup<GenericType>(name);
@@ -145,7 +159,7 @@ base::Optional<GenericType*> Declarations::TryLookupGenericType(
 }
 
 Namespace* Declarations::DeclareNamespace(const std::string& name) {
-  return Declare(name, std::unique_ptr<Namespace>(new Namespace(name)));
+  return Declare(name, std::make_unique<Namespace>(name));
 }
 
 TypeAlias* Declarations::DeclareType(const Identifier* name, const Type* type) {
@@ -265,8 +279,8 @@ RuntimeFunction* Declarations::DeclareRuntimeFunction(
 void Declarations::DeclareExternConstant(Identifier* name, const Type* type,
                                          std::string value) {
   CheckAlreadyDeclared<Value>(name->value, "constant");
-  ExternConstant* result = new ExternConstant(name, type, value);
-  Declare(name->value, std::unique_ptr<Declarable>(result));
+  Declare(name->value, std::unique_ptr<ExternConstant>(
+                           new ExternConstant(name, type, value)));
 }
 
 NamespaceConstant* Declarations::DeclareNamespaceConstant(Identifier* name,
@@ -274,9 +288,10 @@ NamespaceConstant* Declarations::DeclareNamespaceConstant(Identifier* name,
                                                           Expression* body) {
   CheckAlreadyDeclared<Value>(name->value, "constant");
   std::string external_name = GlobalContext::MakeUniqueName(name->value);
-  NamespaceConstant* result =
-      new NamespaceConstant(name, std::move(external_name), type, body);
-  Declare(name->value, std::unique_ptr<Declarable>(result));
+  std::unique_ptr<NamespaceConstant> namespaceConstant(
+      new NamespaceConstant(name, std::move(external_name), type, body));
+  NamespaceConstant* result = namespaceConstant.get();
+  Declare(name->value, std::move(namespaceConstant));
   return result;
 }
 

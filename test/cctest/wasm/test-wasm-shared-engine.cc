@@ -86,7 +86,8 @@ class SharedEngineIsolate {
 
   Handle<WasmInstanceObject> ImportInstance(SharedModule shared_module) {
     Handle<WasmModuleObject> module_object =
-        isolate()->wasm_engine()->ImportNativeModule(isolate(), shared_module);
+        isolate()->wasm_engine()->ImportNativeModule(isolate(), shared_module,
+                                                     {});
     ErrorThrower thrower(isolate(), "ImportInstance");
     MaybeHandle<WasmInstanceObject> instance =
         isolate()->wasm_engine()->SyncInstantiate(isolate(), &thrower,
@@ -99,7 +100,8 @@ class SharedEngineIsolate {
   }
 
   int32_t Run(Handle<WasmInstanceObject> instance) {
-    return testing::RunWasmModuleForTesting(isolate(), instance, 0, nullptr);
+    return testing::CallWasmFunctionForTesting(isolate(), instance, "main", 0,
+                                               nullptr);
   }
 
  private:
@@ -131,8 +133,8 @@ namespace {
 
 ZoneBuffer* BuildReturnConstantModule(Zone* zone, int constant) {
   TestSignatures sigs;
-  ZoneBuffer* buffer = new (zone) ZoneBuffer(zone);
-  WasmModuleBuilder* builder = new (zone) WasmModuleBuilder(zone);
+  ZoneBuffer* buffer = zone->New<ZoneBuffer>(zone);
+  WasmModuleBuilder* builder = zone->New<WasmModuleBuilder>(zone);
   WasmFunctionBuilder* f = builder->AddFunction(sigs.i_v());
   f->builder()->AddExport(CStrVector("main"), f);
   byte code[] = {WASM_I32V_2(constant)};
@@ -186,8 +188,8 @@ void PumpMessageLoop(SharedEngineIsolate* isolate) {
 
 Handle<WasmInstanceObject> CompileAndInstantiateAsync(
     SharedEngineIsolate* isolate, ZoneBuffer* buffer) {
-  Handle<Object> maybe_instance = handle(Smi::kZero, isolate->isolate());
-  auto enabled_features = WasmFeaturesFromIsolate(isolate->isolate());
+  Handle<Object> maybe_instance = handle(Smi::zero(), isolate->isolate());
+  auto enabled_features = WasmFeatures::FromIsolate(isolate->isolate());
   constexpr const char* kAPIMethodName = "Test.CompileAndInstantiateAsync";
   isolate->isolate()->wasm_engine()->AsyncCompile(
       isolate->isolate(), enabled_features,
@@ -350,7 +352,7 @@ TEST(SharedEngineRunThreadedTierUp) {
   threads.emplace_back(&engine, [module](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
     Handle<WasmInstanceObject> instance = isolate->ImportInstance(module);
-    WasmFeatures detected = kNoWasmFeatures;
+    WasmFeatures detected = WasmFeatures::None();
     WasmCompilationUnit::CompileWasmFunction(
         isolate->isolate(), module.get(), &detected,
         &module->module()->functions[0], ExecutionTier::kTurbofan);

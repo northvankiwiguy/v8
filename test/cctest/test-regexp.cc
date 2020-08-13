@@ -50,6 +50,7 @@
 #include "src/utils/ostreams.h"
 #include "src/zone/zone-list-inl.h"
 #include "test/cctest/cctest.h"
+#include "test/common/wasm/flag-utils.h"
 
 namespace v8 {
 namespace internal {
@@ -76,7 +77,7 @@ static void CheckParseEq(const char* input, const char* expected,
   CHECK(v8::internal::RegExpParser::ParseRegExp(CcTest::i_isolate(), &zone,
                                                 &reader, flags, &result));
   CHECK_NOT_NULL(result.tree);
-  CHECK(result.error.is_null());
+  CHECK(result.error == RegExpError::kNone);
   std::ostringstream os;
   result.tree->Print(os, &zone);
   if (strcmp(expected, os.str().c_str()) != 0) {
@@ -94,7 +95,7 @@ static bool CheckSimple(const char* input) {
   CHECK(v8::internal::RegExpParser::ParseRegExp(
       CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result));
   CHECK_NOT_NULL(result.tree);
-  CHECK(result.error.is_null());
+  CHECK(result.error == RegExpError::kNone);
   return result.simple;
 }
 
@@ -112,7 +113,7 @@ static MinMaxPair CheckMinMaxMatch(const char* input) {
   CHECK(v8::internal::RegExpParser::ParseRegExp(
       CcTest::i_isolate(), &zone, &reader, JSRegExp::kNone, &result));
   CHECK_NOT_NULL(result.tree);
-  CHECK(result.error.is_null());
+  CHECK(result.error == RegExpError::kNone);
   int min_match = result.tree->min_match();
   int max_match = result.tree->max_match();
   MinMaxPair pair = { min_match, max_match };
@@ -428,9 +429,8 @@ static void ExpectError(const char* input, const char* expected,
   CHECK(!v8::internal::RegExpParser::ParseRegExp(isolate, &zone, &reader, flags,
                                                  &result));
   CHECK_NULL(result.tree);
-  CHECK(!result.error.is_null());
-  std::unique_ptr<char[]> str = result.error->ToCString(ALLOW_NULLS);
-  CHECK_EQ(0, strcmp(expected, str.get()));
+  CHECK(result.error != RegExpError::kNone);
+  CHECK_EQ(0, strcmp(expected, RegExpErrorString(result.error)));
 }
 
 
@@ -468,7 +468,7 @@ TEST(Errors) {
   ExpectError("\\k<a", kInvalidCaptureName, true);
   const char* kDuplicateCaptureName = "Duplicate capture group name";
   ExpectError("(?<a>.)(?<a>.)", kDuplicateCaptureName, true);
-  const char* kInvalidUnicodeEscape = "Invalid Unicode escape sequence";
+  const char* kInvalidUnicodeEscape = "Invalid Unicode escape";
   ExpectError("(?<\\u{FISK}", kInvalidUnicodeEscape, true);
   const char* kInvalidCaptureReferenced = "Invalid named capture referenced";
   ExpectError("\\k<a>", kInvalidCaptureReferenced, true);
@@ -508,7 +508,7 @@ static bool NotWord(uc16 c) {
 static void TestCharacterClassEscapes(uc16 c, bool (pred)(uc16 c)) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
   ZoneList<CharacterRange>* ranges =
-      new(&zone) ZoneList<CharacterRange>(2, &zone);
+      zone.New<ZoneList<CharacterRange>>(2, &zone);
   CharacterRange::AddClassEscape(c, ranges, &zone);
   for (uc32 i = 0; i < (1 << 16); i++) {
     bool in_class = false;
@@ -607,7 +607,7 @@ using ArchRegExpMacroAssembler = RegExpMacroAssemblerARM;
 using ArchRegExpMacroAssembler = RegExpMacroAssemblerARM64;
 #elif V8_TARGET_ARCH_S390
 using ArchRegExpMacroAssembler = RegExpMacroAssemblerS390;
-#elif V8_TARGET_ARCH_PPC
+#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
 using ArchRegExpMacroAssembler = RegExpMacroAssemblerPPC;
 #elif V8_TARGET_ARCH_MIPS
 using ArchRegExpMacroAssembler = RegExpMacroAssemblerMIPS;
@@ -721,9 +721,9 @@ TEST(MacroAssemblerNativeSimple) {
   m.AdvanceCurrentPosition(3);
   m.PushBacktrack(&backtrack);
   m.Succeed();
-  m.Bind(&backtrack);
+  m.BindJumpTarget(&backtrack);
   m.Backtrack();
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.Fail();
 
   Handle<String> source = factory->NewStringFromStaticChars("^foo");
@@ -780,9 +780,9 @@ TEST(MacroAssemblerNativeSimpleUC16) {
   m.AdvanceCurrentPosition(3);
   m.PushBacktrack(&backtrack);
   m.Succeed();
-  m.Bind(&backtrack);
+  m.BindJumpTarget(&backtrack);
   m.Backtrack();
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.Fail();
 
   Handle<String> source = factory->NewStringFromStaticChars("^foo");
@@ -835,11 +835,11 @@ TEST(MacroAssemblerNativeBacktrack) {
   Label backtrack;
   m.LoadCurrentCharacter(10, &fail);
   m.Succeed();
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.PushBacktrack(&backtrack);
   m.LoadCurrentCharacter(10, nullptr);
   m.Succeed();
-  m.Bind(&backtrack);
+  m.BindJumpTarget(&backtrack);
   m.Fail();
 
   Handle<String> source = factory->NewStringFromStaticChars("..........");
@@ -967,7 +967,7 @@ TEST(MacroAssemblernativeAtStart) {
   m.CheckNotAtStart(0, &not_at_start);
   // Check that prevchar = '\n' and current = 'f'.
   m.CheckCharacter('\n', &newline);
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.Fail();
   m.Bind(&newline);
   m.LoadCurrentCharacter(0, &fail);
@@ -1025,7 +1025,7 @@ TEST(MacroAssemblerNativeBackRefNoCase) {
   m.CheckNotBackReferenceIgnoreCase(2, false, false, &fail);  // Match "ABC".
   Label expected_fail;
   m.CheckNotBackReferenceIgnoreCase(2, false, false, &expected_fail);
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.Fail();
 
   m.Bind(&expected_fail);
@@ -1094,7 +1094,7 @@ TEST(MacroAssemblerNativeRegisters) {
   m.AdvanceCurrentPosition(2);
   m.PopCurrentPosition();
 
-  m.Bind(&backtrack);
+  m.BindJumpTarget(&backtrack);
   m.PopRegister(out1);
   m.ReadCurrentPositionFromRegister(out1);
   m.AdvanceCurrentPosition(3);
@@ -1131,7 +1131,7 @@ TEST(MacroAssemblerNativeRegisters) {
 
   m.Succeed();
 
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.Fail();
 
   Handle<String> source = factory->NewStringFromStaticChars("<loop test>");
@@ -1265,10 +1265,10 @@ TEST(MacroAssembler) {
   m.AdvanceCurrentPosition(3);
   m.PushBacktrack(&backtrack);
   m.Succeed();
-  m.Bind(&backtrack);
+  m.BindJumpTarget(&backtrack);
   m.ClearRegisters(2, 3);
   m.Backtrack();
-  m.Bind(&fail);
+  m.BindJumpTarget(&fail);
   m.PopRegister(0);
   m.Fail();
 
@@ -1279,14 +1279,16 @@ TEST(MacroAssembler) {
   Handle<String> source = factory->NewStringFromStaticChars("^f(o)o");
   Handle<ByteArray> array = Handle<ByteArray>::cast(m.GetCode(source));
   int captures[5];
+  std::memset(captures, 0, sizeof(captures));
 
   const uc16 str1[] = {'f', 'o', 'o', 'b', 'a', 'r'};
   Handle<String> f1_16 = factory->NewStringFromTwoByte(
       Vector<const uc16>(str1, 6)).ToHandleChecked();
 
-  CHECK(IrregexpInterpreter::MatchInternal(isolate, *array, *f1_16, captures, 5,
-                                           0, RegExp::CallOrigin::kFromRuntime,
-                                           JSRegExp::kNoBacktrackLimit));
+  CHECK_EQ(IrregexpInterpreter::SUCCESS,
+           IrregexpInterpreter::MatchInternal(
+               isolate, *array, *f1_16, captures, 5, 5, 0,
+               RegExp::CallOrigin::kFromRuntime, JSRegExp::kNoBacktrackLimit));
   CHECK_EQ(0, captures[0]);
   CHECK_EQ(3, captures[1]);
   CHECK_EQ(1, captures[2]);
@@ -1297,10 +1299,17 @@ TEST(MacroAssembler) {
   Handle<String> f2_16 = factory->NewStringFromTwoByte(
       Vector<const uc16>(str2, 6)).ToHandleChecked();
 
-  CHECK(!IrregexpInterpreter::MatchInternal(
-      isolate, *array, *f2_16, captures, 5, 0, RegExp::CallOrigin::kFromRuntime,
-      JSRegExp::kNoBacktrackLimit));
-  CHECK_EQ(42, captures[0]);
+  std::memset(captures, 0, sizeof(captures));
+  CHECK_EQ(IrregexpInterpreter::FAILURE,
+           IrregexpInterpreter::MatchInternal(
+               isolate, *array, *f2_16, captures, 5, 5, 0,
+               RegExp::CallOrigin::kFromRuntime, JSRegExp::kNoBacktrackLimit));
+  // Failed matches don't alter output registers.
+  CHECK_EQ(0, captures[0]);
+  CHECK_EQ(0, captures[1]);
+  CHECK_EQ(0, captures[2]);
+  CHECK_EQ(0, captures[3]);
+  CHECK_EQ(0, captures[4]);
 }
 
 #ifndef V8_INTL_SUPPORT
@@ -1406,7 +1415,7 @@ static void TestRangeCaseIndependence(Isolate* isolate, CharacterRange input,
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
   int count = expected.length();
   ZoneList<CharacterRange>* list =
-      new(&zone) ZoneList<CharacterRange>(count, &zone);
+      zone.New<ZoneList<CharacterRange>>(count, &zone);
   list->Add(input, &zone);
   CharacterRange::AddCaseEquivalents(isolate, &zone, list, false);
   list->Remove(0);  // Remove the input before checking results.
@@ -1477,8 +1486,7 @@ static bool InClass(uc32 c,
 
 TEST(UnicodeRangeSplitter) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-  ZoneList<CharacterRange>* base =
-      new(&zone) ZoneList<CharacterRange>(1, &zone);
+  ZoneList<CharacterRange>* base = zone.New<ZoneList<CharacterRange>>(1, &zone);
   base->Add(CharacterRange::Everything(), &zone);
   UnicodeRangeSplitter splitter(base);
   // BMP
@@ -1521,8 +1529,7 @@ TEST(UnicodeRangeSplitter) {
 
 TEST(CanonicalizeCharacterSets) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-  ZoneList<CharacterRange>* list =
-      new(&zone) ZoneList<CharacterRange>(4, &zone);
+  ZoneList<CharacterRange>* list = zone.New<ZoneList<CharacterRange>>(4, &zone);
   CharacterSet set(list);
 
   list->Add(CharacterRange::Range(10, 20), &zone);
@@ -2330,6 +2337,31 @@ TEST(PeepholeLabelFixupsComplex) {
           labels[label_idx]->pos() + target_fixups[label_idx];
       CHECK_EQ(expected_jump_address, jump_address);
     }
+  }
+}
+
+TEST(UnicodePropertyEscapeCodeSize) {
+  i::FlagScope<bool> f(&v8::internal::FLAG_regexp_tier_up, false);
+
+  LocalContext env;
+  v8::HandleScope scope(CcTest::isolate());
+  i::Handle<i::JSRegExp> re = Utils::OpenHandle(
+      *CompileRun("const r = /\\p{L}\\p{L}\\p{L}/u; r.exec('\\u200b'); r;")
+           .As<v8::RegExp>());
+
+  static constexpr int kMaxSize = 200 * KB;
+  static constexpr bool kIsNotLatin1 = false;
+  Object maybe_code = re->Code(kIsNotLatin1);
+  Object maybe_bytecode = re->Bytecode(kIsNotLatin1);
+  if (maybe_bytecode.IsByteArray()) {
+    // On x64, excessive inlining produced >250KB.
+    CHECK_LT(ByteArray::cast(maybe_bytecode).Size(), kMaxSize);
+  } else if (maybe_code.IsCode()) {
+    // On x64, excessive inlining produced >360KB.
+    CHECK_LT(Code::cast(maybe_code).Size(), kMaxSize);
+    CHECK_EQ(Code::cast(maybe_code).kind(), CodeKind::REGEXP);
+  } else {
+    UNREACHABLE();
   }
 }
 

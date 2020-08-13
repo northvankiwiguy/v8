@@ -38,6 +38,7 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kUint32 = Type::Unsigned32();
   Type const kInt64 = CreateRange<int64_t>();
   Type const kUint64 = CreateRange<uint64_t>();
+  Type const kIntPtr = CreateRange<intptr_t>();
   Type const kFloat32 = Type::Number();
   Type const kFloat64 = Type::Number();
   Type const kBigInt64 = Type::BigInt();
@@ -91,6 +92,11 @@ class V8_EXPORT_PRIVATE TypeCache final {
   // [0, FixedArray::kMaxLength].
   Type const kFixedArrayLengthType = CreateRange(0.0, FixedArray::kMaxLength);
 
+  // The WeakFixedArray::length property always containts a smi in the range
+  // [0, WeakFixedArray::kMaxLength].
+  Type const kWeakFixedArrayLengthType =
+      CreateRange(0.0, WeakFixedArray::kMaxLength);
+
   // The FixedDoubleArray::length property always containts a smi in the range
   // [0, FixedDoubleArray::kMaxLength].
   Type const kFixedDoubleArrayLengthType =
@@ -115,7 +121,7 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kJSArrayBufferViewByteOffsetType = kJSArrayBufferByteLengthType;
 
   // The JSTypedArray::length property always contains an untagged number in
-  // the range [0, kMaxSmiValue].
+  // the range [0, JSTypedArray::kMaxLength].
   Type const kJSTypedArrayLengthType =
       CreateRange(0.0, JSTypedArray::kMaxLength);
 
@@ -171,6 +177,11 @@ class V8_EXPORT_PRIVATE TypeCache final {
   // materialize more than the max size of a fixed array, because we require a
   // fixed array in spread/apply calls.
   Type const kArgumentsLengthType = CreateRange(0.0, FixedArray::kMaxLength);
+
+  // The valid number of arguments for rest parameters. We can never
+  // materialize more than the max size of a fixed array, because we require a
+  // fixed array in spread/apply calls.
+  Type const kRestLengthType = CreateRange(0.0, FixedArray::kMaxLength);
 
   // The JSArrayIterator::kind property always contains an integer in the
   // range [0, 2], representing the possible IterationKinds.

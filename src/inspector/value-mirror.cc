@@ -39,20 +39,41 @@ V8InternalValueType v8InternalValueTypeFrom(v8::Local<v8::Context> context,
   return inspectedContext->getInternalType(value.As<v8::Object>());
 }
 
+template <typename ResultType>
+ResultType unpackWasmValue(v8::Local<v8::Context> context,
+                           v8::Local<v8::Array> array) {
+  ResultType result;
+  constexpr int kSize = sizeof(result);
+  uint8_t buffer[kSize];
+  for (int i = 0; i < kSize; i++) {
+    v8::Local<v8::Int32> i32 =
+        array->Get(context, i).ToLocalChecked().As<v8::Int32>();
+    buffer[i] = static_cast<uint8_t>(i32->Value());
+  }
+  memcpy(&result, buffer, kSize);
+  return result;
+}
+
+// Partial list of Wasm's ValueType, copied here to avoid including internal
+// header. Using an unscoped enumeration here to allow implicit conversions from
+// int. Keep in sync with ValueType::Kind in wasm/value-type.h.
+enum WasmValueType { kStmt, kI32, kI64, kF32, kF64, kS128, kExternRef };
+
 Response toProtocolValue(v8::Local<v8::Context> context,
                          v8::Local<v8::Value> value, int maxDepth,
                          std::unique_ptr<protocol::Value>* result) {
-  if (!maxDepth) return Response::Error("Object reference chain is too long");
+  if (!maxDepth)
+    return Response::ServerError("Object reference chain is too long");
   maxDepth--;
 
   if (value->IsNull() || value->IsUndefined()) {
     *result = protocol::Value::null();
-    return Response::OK();
+    return Response::Success();
   }
   if (value->IsBoolean()) {
     *result =
         protocol::FundamentalValue::create(value.As<v8::Boolean>()->Value());
-    return Response::OK();
+    return Response::Success();
   }
   if (value->IsNumber()) {
     double doubleValue = value.As<v8::Number>()->Value();
@@ -62,16 +83,16 @@ Response toProtocolValue(v8::Local<v8::Context> context,
       int intValue = static_cast<int>(doubleValue);
       if (intValue == doubleValue) {
         *result = protocol::FundamentalValue::create(intValue);
-        return Response::OK();
+        return Response::Success();
       }
     }
     *result = protocol::FundamentalValue::create(doubleValue);
-    return Response::OK();
+    return Response::Success();
   }
   if (value->IsString()) {
     *result = protocol::StringValue::create(
         toProtocolString(context->GetIsolate(), value.As<v8::String>()));
-    return Response::OK();
+    return Response::Success();
   }
   if (value->IsArray()) {
     v8::Local<v8::Array> array = value.As<v8::Array>();
@@ -84,11 +105,11 @@ Response toProtocolValue(v8::Local<v8::Context> context,
         return Response::InternalError();
       std::unique_ptr<protocol::Value> element;
       Response response = toProtocolValue(context, value, maxDepth, &element);
-      if (!response.isSuccess()) return response;
+      if (!response.IsSuccess()) return response;
       inspectorArray->pushValue(std::move(element));
     }
     *result = std::move(inspectorArray);
-    return Response::OK();
+    return Response::Success();
   }
   if (value->IsObject()) {
     std::unique_ptr<protocol::DictionaryValue> jsonObject =
@@ -119,21 +140,64 @@ Response toProtocolValue(v8::Local<v8::Context> context,
       std::unique_ptr<protocol::Value> propertyValue;
       Response response =
           toProtocolValue(context, property, maxDepth, &propertyValue);
-      if (!response.isSuccess()) return response;
+      if (!response.IsSuccess()) return response;
       jsonObject->setValue(
           toProtocolString(context->GetIsolate(), propertyName),
           std::move(propertyValue));
     }
     *result = std::move(jsonObject);
-    return Response::OK();
+    return Response::Success();
   }
-  return Response::Error("Object couldn't be returned by value");
+
+  if (v8::debug::WasmValue::IsWasmValue(value)) {
+    auto wasmValue = value.As<v8::debug::WasmValue>();
+
+    // Convert serializable Wasm values (i32, f32, f64) into protocol values.
+    // Not all i64 values are representable by double, so always represent it as
+    // a String here.
+    switch (wasmValue->value_type()) {
+      case kI32: {
+        *result = protocol::FundamentalValue::create(
+            unpackWasmValue<int32_t>(context, wasmValue->bytes()));
+        break;
+      }
+      case kI64: {
+        *result = protocol::StringValue::create(String16::fromInteger64(
+            unpackWasmValue<int64_t>(context, wasmValue->bytes())));
+        break;
+      }
+      case kF32: {
+        *result = protocol::FundamentalValue::create(
+            unpackWasmValue<float>(context, wasmValue->bytes()));
+        break;
+      }
+      case kF64: {
+        *result = protocol::FundamentalValue::create(
+            unpackWasmValue<double>(context, wasmValue->bytes()));
+        break;
+      }
+      case kExternRef: {
+        std::unique_ptr<protocol::Value> externrefValue;
+        Response response = toProtocolValue(context, wasmValue->ref(), maxDepth,
+                                            &externrefValue);
+        if (!response.IsSuccess()) return response;
+        *result = std::move(externrefValue);
+        break;
+      }
+      default: {
+        UNIMPLEMENTED();
+      }
+    }
+    return Response::Success();
+  }
+
+  return Response::ServerError("Object couldn't be returned by value");
 }
 
 Response toProtocolValue(v8::Local<v8::Context> context,
                          v8::Local<v8::Value> value,
                          std::unique_ptr<protocol::Value>* result) {
-  if (value->IsUndefined()) return Response::OK();
+  if (value->IsUndefined()) return Response::Success();
   return toProtocolValue(context, value, 1000, result);
 }
 
@@ -153,10 +217,10 @@ String16 abbreviateString(const String16& value, AbbreviateMode mode) {
 
 String16 descriptionForSymbol(v8::Local<v8::Context> context,
                               v8::Local<v8::Symbol> symbol) {
-  return String16::concat(
-      "Symbol(",
-      toProtocolStringWithTypeCheck(context->GetIsolate(), symbol->Name()),
-      ")");
+  return String16::concat("Symbol(",
+                          toProtocolStringWithTypeCheck(context->GetIsolate(),
+                                                        symbol->Description()),
+                          ")");
 }
 
 String16 descriptionForBigInt(v8::Local<v8::Context> context,
@@ -361,7 +425,7 @@ class PrimitiveValueMirror final : public ValueMirror {
                   .build();
     if (m_value->IsNull())
       (*result)->setSubtype(RemoteObject::SubtypeEnum::Null);
-    return Response::OK();
+    return Response::Success();
   }
 
   void buildEntryPreview(
@@ -397,6 +461,112 @@ class PrimitiveValueMirror final : public ValueMirror {
   String16 m_subtype;
 };
 
+class WasmValueMirror final : public ValueMirror {
+ public:
+  explicit WasmValueMirror(v8::Local<v8::debug::WasmValue> value)
+      : m_value(value) {}
+
+  v8::Local<v8::Value> v8Value() const override { return m_value; }
+
+  Response buildRemoteObject(
+      v8::Local<v8::Context> context, WrapMode mode,
+      std::unique_ptr<RemoteObject>* result) const override {
+    bool serializable;
+    String16 descriptionValue = description(context, &serializable);
+    *result = RemoteObject::create()
+                  .setType(RemoteObject::TypeEnum::Wasm)
+                  .setSubtype(subtype())
+                  .setDescription(descriptionValue)
+                  .build();
+    if (serializable) {
+      std::unique_ptr<protocol::Value> protocolValue;
+      toProtocolValue(context, m_value, &protocolValue);
+      (*result)->setValue(std::move(protocolValue));
+    } else {
+      (*result)->setUnserializableValue(descriptionValue);
+    }
+    return Response::Success();
+  }
+
+  void buildPropertyPreview(
+      v8::Local<v8::Context> context, const String16& name,
+      std::unique_ptr<PropertyPreview>* result) const override {
+    bool serializable;
+    *result = PropertyPreview::create()
+                  .setName(name)
+                  .setType(RemoteObject::TypeEnum::Wasm)
+                  .setSubtype(subtype())
+                  .setValue(description(context, &serializable))
+                  .build();
+  }
+
+  void buildEntryPreview(
+      v8::Local<v8::Context> context, int* nameLimit, int* indexLimit,
+      std::unique_ptr<ObjectPreview>* preview) const override {
+    bool serializable;
+    *preview =
+        ObjectPreview::create()
+            .setType(RemoteObject::TypeEnum::Wasm)
+            .setSubtype(subtype())
+            .setDescription(description(context, &serializable))
+            .setOverflow(false)
+            .setProperties(std::make_unique<protocol::Array<PropertyPreview>>())
+            .build();
+  }
+
+ private:
+  String16 subtype() const {
+    switch (m_value->value_type()) {
+      case kI32:
+        return RemoteObject::SubtypeEnum::I32;
+      case kI64:
+        return RemoteObject::SubtypeEnum::I64;
+      case kF32:
+        return RemoteObject::SubtypeEnum::F32;
+      case kF64:
+        return RemoteObject::SubtypeEnum::F64;
+      case kExternRef:
+        return RemoteObject::SubtypeEnum::Externref;
+      default:
+        UNREACHABLE();
+    }
+  }
+
+  String16 description(v8::Local<v8::Context> context,
+                       bool* serializable) const {
+    *serializable = true;
+    switch (m_value->value_type()) {
+      case kI32: {
+        return String16::fromInteger(
+            unpackWasmValue<int32_t>(context, m_value->bytes()));
+      }
+      case kI64: {
+        *serializable = false;
+        return String16::fromInteger64(
+            unpackWasmValue<int64_t>(context, m_value->bytes()));
+      }
+      case kF32: {
+        return String16::fromDouble(
+            unpackWasmValue<float>(context, m_value->bytes()));
+      }
+      case kF64: {
+        return String16::fromDouble(
+            unpackWasmValue<double>(context, m_value->bytes()));
+      }
+      case kExternRef: {
+        return descriptionForObject(context->GetIsolate(),
+                                    m_value->ref().As<v8::Object>());
+      }
+      default: {
+        *serializable = false;
+        return String16("Unknown");
+      }
+    }
+  }
+
+  v8::Local<v8::debug::WasmValue> m_value;
+};
+
 class NumberMirror final : public ValueMirror {
  public:
   explicit NumberMirror(v8::Local<v8::Number> value) : m_value(value) {}
@@ -416,7 +586,7 @@ class NumberMirror final : public ValueMirror {
     } else {
       (*result)->setValue(protocol::FundamentalValue::create(m_value->Value()));
     }
-    return Response::OK();
+    return Response::Success();
   }
   void buildPropertyPreview(
       v8::Local<v8::Context> context, const String16& name,
@@ -470,7 +640,7 @@ class BigIntMirror final : public ValueMirror {
                   .setUnserializableValue(description)
                   .setDescription(description)
                   .build();
-    return Response::OK();
+    return Response::Success();
   }
 
   void buildPropertyPreview(v8::Local<v8::Context> context,
@@ -513,13 +683,13 @@ class SymbolMirror final : public ValueMirror {
       v8::Local<v8::Context> context, WrapMode mode,
       std::unique_ptr<RemoteObject>* result) const override {
     if (mode == WrapMode::kForceValue) {
-      return Response::Error("Object couldn't be returned by value");
+      return Response::ServerError("Object couldn't be returned by value");
     }
     *result = RemoteObject::create()
                   .setType(RemoteObject::TypeEnum::Symbol)
                   .setDescription(descriptionForSymbol(context, m_symbol))
                   .build();
-    return Response::OK();
+    return Response::Success();
   }
 
   void buildPropertyPreview(v8::Local<v8::Context> context,
@@ -576,7 +746,7 @@ class LocationMirror final : public ValueMirror {
                   .setDescription("Object")
                   .setValue(std::move(location))
                   .build();
-    return Response::OK();
+    return Response::Success();
   }
   v8::Local<v8::Value> v8Value() const override { return m_value; }
 
@@ -620,7 +790,7 @@ class FunctionMirror final : public ValueMirror {
     if (mode == WrapMode::kForceValue) {
       std::unique_ptr<protocol::Value> protocolValue;
       Response response = toProtocolValue(context, m_value, &protocolValue);
-      if (!response.isSuccess()) return response;
+      if (!response.IsSuccess()) return response;
       *result = RemoteObject::create()
                     .setType(RemoteObject::TypeEnum::Function)
                     .setValue(std::move(protocolValue))
@@ -633,7 +803,7 @@ class FunctionMirror final : public ValueMirror {
                     .setDescription(descriptionForFunction(context, m_value))
                     .build();
     }
-    return Response::OK();
+    return Response::Success();
   }
 
   void buildPropertyPreview(
@@ -726,11 +896,11 @@ struct EntryMirror {
 
 class PreviewPropertyAccumulator : public ValueMirror::PropertyAccumulator {
  public:
-  PreviewPropertyAccumulator(const std::vector<String16>& blacklist,
+  PreviewPropertyAccumulator(const std::vector<String16>& blocklist,
                              int skipIndex, int* nameLimit, int* indexLimit,
                              bool* overflow,
                              std::vector<PropertyMirror>* mirrors)
-      : m_blacklist(blacklist),
+      : m_blocklist(blocklist),
         m_skipIndex(skipIndex),
         m_nameLimit(nameLimit),
         m_indexLimit(indexLimit),
@@ -744,8 +914,8 @@ class PreviewPropertyAccumulator : public ValueMirror::PropertyAccumulator {
       return true;
     }
     if (!mirror.isOwn) return true;
-    if (std::find(m_blacklist.begin(), m_blacklist.end(), mirror.name) !=
-        m_blacklist.end()) {
+    if (std::find(m_blocklist.begin(), m_blocklist.end(), mirror.name) !=
+        m_blocklist.end()) {
       return true;
     }
     if (mirror.isIndex && m_skipIndex > 0) {
@@ -763,7 +933,7 @@ class PreviewPropertyAccumulator : public ValueMirror::PropertyAccumulator {
   }
 
  private:
-  std::vector<String16> m_blacklist;
+  std::vector<String16> m_blocklist;
   int m_skipIndex;
   int* m_nameLimit;
   int* m_indexLimit;
@@ -775,27 +945,27 @@ bool getPropertiesForPreview(v8::Local<v8::Context> context,
                              v8::Local<v8::Object> object, int* nameLimit,
                              int* indexLimit, bool* overflow,
                              std::vector<PropertyMirror>* properties) {
-  std::vector<String16> blacklist;
+  std::vector<String16> blocklist;
   size_t length = 0;
   if (object->IsArray() || isArrayLike(context, object, &length) ||
       object->IsStringObject()) {
-    blacklist.push_back("length");
+    blocklist.push_back("length");
   } else {
     auto clientSubtype = clientFor(context)->valueSubtype(object);
     if (clientSubtype && toString16(clientSubtype->string()) == "array") {
-      blacklist.push_back("length");
+      blocklist.push_back("length");
     }
   }
   if (object->IsArrayBuffer() || object->IsSharedArrayBuffer()) {
-    blacklist.push_back("[[Int8Array]]");
-    blacklist.push_back("[[Uint8Array]]");
-    blacklist.push_back("[[Int16Array]]");
-    blacklist.push_back("[[Int32Array]]");
+    blocklist.push_back("[[Int8Array]]");
+    blocklist.push_back("[[Uint8Array]]");
+    blocklist.push_back("[[Int16Array]]");
+    blocklist.push_back("[[Int32Array]]");
   }
   int skipIndex = object->IsStringObject()
                       ? object.As<v8::StringObject>()->ValueOf()->Length() + 1
                       : -1;
-  PreviewPropertyAccumulator accumulator(blacklist, skipIndex, nameLimit,
+  PreviewPropertyAccumulator accumulator(blocklist, skipIndex, nameLimit,
                                          indexLimit, overflow, properties);
   return ValueMirror::getProperties(context, object, false, false,
                                     &accumulator);
@@ -807,20 +977,20 @@ void getInternalPropertiesForPreview(
     std::vector<InternalPropertyMirror>* properties) {
   std::vector<InternalPropertyMirror> mirrors;
   ValueMirror::getInternalProperties(context, object, &mirrors);
-  std::vector<String16> whitelist;
+  std::vector<String16> allowlist;
   if (object->IsBooleanObject() || object->IsNumberObject() ||
       object->IsStringObject() || object->IsSymbolObject() ||
       object->IsBigIntObject()) {
-    whitelist.emplace_back("[[PrimitiveValue]]");
+    allowlist.emplace_back("[[PrimitiveValue]]");
   } else if (object->IsPromise()) {
-    whitelist.emplace_back("[[PromiseStatus]]");
-    whitelist.emplace_back("[[PromiseValue]]");
+    allowlist.emplace_back("[[PromiseState]]");
+    allowlist.emplace_back("[[PromiseResult]]");
   } else if (object->IsGeneratorObject()) {
-    whitelist.emplace_back("[[GeneratorStatus]]");
+    allowlist.emplace_back("[[GeneratorState]]");
   }
   for (auto& mirror : mirrors) {
-    if (std::find(whitelist.begin(), whitelist.end(), mirror.name) ==
-        whitelist.end()) {
+    if (std::find(allowlist.begin(), allowlist.end(), mirror.name) ==
+        allowlist.end()) {
       continue;
     }
     if (!*nameLimit) {
@@ -838,10 +1008,17 @@ void getPrivatePropertiesForPreview(
     protocol::Array<PropertyPreview>* privateProperties) {
   std::vector<PrivatePropertyMirror> mirrors =
       ValueMirror::getPrivateProperties(context, object);
-  std::vector<String16> whitelist;
   for (auto& mirror : mirrors) {
     std::unique_ptr<PropertyPreview> propertyPreview;
-    mirror.value->buildPropertyPreview(context, mirror.name, &propertyPreview);
+    if (mirror.value) {
+      mirror.value->buildPropertyPreview(context, mirror.name,
+                                         &propertyPreview);
+    } else {
+      propertyPreview = PropertyPreview::create()
+                            .setName(mirror.name)
+                            .setType(PropertyPreview::TypeEnum::Accessor)
+                            .build();
+    }
     if (!propertyPreview) continue;
     if (!*nameLimit) {
       *overflow = true;
@@ -873,7 +1050,7 @@ class ObjectMirror final : public ValueMirror {
     if (mode == WrapMode::kForceValue) {
       std::unique_ptr<protocol::Value> protocolValue;
       Response response = toProtocolValue(context, m_value, &protocolValue);
-      if (!response.isSuccess()) return response;
+      if (!response.IsSuccess()) return response;
       *result = RemoteObject::create()
                     .setType(RemoteObject::TypeEnum::Object)
                     .setValue(std::move(protocolValue))
@@ -896,7 +1073,7 @@ class ObjectMirror final : public ValueMirror {
         (*result)->setPreview(std::move(previewValue));
       }
     }
-    return Response::OK();
+    return Response::Success();
   }
 
   void buildObjectPreview(
@@ -1415,40 +1592,40 @@ std::vector<PrivatePropertyMirror> ValueMirror::getPrivateProperties(
   v8::TryCatch tryCatch(isolate);
   v8::Local<v8::Array> privateProperties;
 
-  if (!v8::debug::GetPrivateFields(context, object).ToLocal(&privateProperties))
+  std::vector<v8::Local<v8::Value>> names;
+  std::vector<v8::Local<v8::Value>> values;
+  if (!v8::debug::GetPrivateMembers(context, object, &names, &values))
     return mirrors;
 
-  for (uint32_t i = 0; i < privateProperties->Length(); i += 2) {
-    v8::Local<v8::Value> name;
-    if (!privateProperties->Get(context, i).ToLocal(&name)) {
-      tryCatch.Reset();
-      continue;
+  size_t len = values.size();
+  for (size_t i = 0; i < len; i++) {
+    v8::Local<v8::Value> name = names[i];
+    DCHECK(name->IsString());
+    v8::Local<v8::Value> value = values[i];
+
+    std::unique_ptr<ValueMirror> valueMirror;
+    std::unique_ptr<ValueMirror> getterMirror;
+    std::unique_ptr<ValueMirror> setterMirror;
+    if (v8::debug::AccessorPair::IsAccessorPair(value)) {
+      v8::Local<v8::debug::AccessorPair> accessors =
+          value.As<v8::debug::AccessorPair>();
+      v8::Local<v8::Value> getter = accessors->getter();
+      v8::Local<v8::Value> setter = accessors->setter();
+      if (!getter->IsNull()) {
+        getterMirror = ValueMirror::create(context, getter);
+      }
+      if (!setter->IsNull()) {
+        setterMirror = ValueMirror::create(context, setter);
+      }
+    } else {
+      valueMirror = ValueMirror::create(context, value);
     }
 
-    // Weirdly, v8::Private is set to be a subclass of v8::Data and
-    // not v8::Value, meaning, we first need to upcast to v8::Data
-    // and then downcast to v8::Private. Changing the hierarchy is a
-    // breaking change now. Not sure if that's possible.
-    //
-    // TODO(gsathya): Add an IsPrivate method to the v8::Private and
-    // assert here.
-    v8::Local<v8::Private> private_field = v8::Local<v8::Private>::Cast(name);
-    v8::Local<v8::Value> private_name = private_field->Name();
-    DCHECK(!private_name->IsUndefined());
-
-    v8::Local<v8::Value> value;
-    if (!privateProperties->Get(context, i + 1).ToLocal(&value)) {
-      tryCatch.Reset();
-      continue;
-    }
-    auto wrapper = ValueMirror::create(context, value);
-    if (wrapper) {
-      mirrors.emplace_back(PrivatePropertyMirror{
-          toProtocolStringWithTypeCheck(context->GetIsolate(), private_name),
-          std::move(wrapper)});
-    }
+    mirrors.emplace_back(PrivatePropertyMirror{
+        toProtocolStringWithTypeCheck(context->GetIsolate(), name),
+        std::move(valueMirror), std::move(getterMirror),
+        std::move(setterMirror)});
   }
-
   return mirrors;
 }
 
@@ -1592,6 +1769,9 @@ std::unique_ptr<ValueMirror> ValueMirror::create(v8::Local<v8::Context> context,
   }
   if (value->IsSymbol()) {
     return std::make_unique<SymbolMirror>(value.As<v8::Symbol>());
+  }
+  if (v8::debug::WasmValue::IsWasmValue(value)) {
+    return std::make_unique<WasmValueMirror>(value.As<v8::debug::WasmValue>());
   }
   auto clientSubtype = (value->IsUndefined() || value->IsObject())
                            ? clientFor(context)->valueSubtype(value)

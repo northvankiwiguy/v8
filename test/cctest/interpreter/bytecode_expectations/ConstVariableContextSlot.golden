@@ -11,13 +11,12 @@ snippet: "
 "
 frame size: 1
 parameter count: 1
-bytecode array length: 15
+bytecode array length: 14
 bytecodes: [
-                B(CreateFunctionContext), U8(0), U8(1),
+  /*   30 E> */ B(CreateFunctionContext), U8(0), U8(1),
                 B(PushContext), R(0),
                 B(LdaTheHole),
                 B(StaCurrentContextSlot), U8(2),
-  /*   30 E> */ B(StackCheck),
   /*   44 S> */ B(LdaSmi), I8(10),
   /*   44 E> */ B(StaCurrentContextSlot), U8(2),
                 B(LdaUndefined),
@@ -35,13 +34,12 @@ snippet: "
 "
 frame size: 1
 parameter count: 1
-bytecode array length: 16
+bytecode array length: 15
 bytecodes: [
-                B(CreateFunctionContext), U8(0), U8(1),
+  /*   30 E> */ B(CreateFunctionContext), U8(0), U8(1),
                 B(PushContext), R(0),
                 B(LdaTheHole),
                 B(StaCurrentContextSlot), U8(2),
-  /*   30 E> */ B(StackCheck),
   /*   44 S> */ B(LdaSmi), I8(10),
   /*   44 E> */ B(StaCurrentContextSlot), U8(2),
   /*   74 S> */ B(LdaImmutableCurrentContextSlot), U8(2),
@@ -59,13 +57,12 @@ snippet: "
 "
 frame size: 2
 parameter count: 1
-bytecode array length: 26
+bytecode array length: 25
 bytecodes: [
-                B(CreateFunctionContext), U8(0), U8(1),
+  /*   30 E> */ B(CreateFunctionContext), U8(0), U8(1),
                 B(PushContext), R(0),
                 B(LdaTheHole),
                 B(StaCurrentContextSlot), U8(2),
-  /*   30 E> */ B(StackCheck),
   /*   44 S> */ B(LdaSmi), I8(20),
                 B(Star), R(1),
                 B(LdaCurrentContextSlot), U8(2),
@@ -88,13 +85,12 @@ snippet: "
 "
 frame size: 1
 parameter count: 1
-bytecode array length: 22
+bytecode array length: 21
 bytecodes: [
-                B(CreateFunctionContext), U8(0), U8(1),
+  /*   30 E> */ B(CreateFunctionContext), U8(0), U8(1),
                 B(PushContext), R(0),
                 B(LdaTheHole),
                 B(StaCurrentContextSlot), U8(2),
-  /*   30 E> */ B(StackCheck),
   /*   44 S> */ B(LdaSmi), I8(10),
   /*   44 E> */ B(StaCurrentContextSlot), U8(2),
   /*   48 S> */ B(LdaSmi), I8(20),

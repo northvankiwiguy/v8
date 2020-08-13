@@ -803,7 +803,7 @@ RUNTIME_FUNCTION(Runtime_StringSplit) {
                                    &last_match_cache_unused,
                                    RegExpResultsCache::STRING_SPLIT_SUBSTRINGS),
         isolate);
-    if (*cached_answer != Smi::kZero) {
+    if (*cached_answer != Smi::zero()) {
       // The cache FixedArray is a COW-array and can therefore be reused.
       Handle<JSArray> result = isolate->factory()->NewJSArrayWithElements(
           Handle<FixedArray>::cast(cached_answer));
@@ -938,8 +938,8 @@ class MatchInfoBackedMatch : public String::Match {
         *capture_name_map_);
 
     if (capture_index == -1) {
-      *state = INVALID;
-      return name;  // Arbitrary string handle.
+      *state = UNMATCHED;
+      return isolate_->factory()->empty_string();
     }
 
     DCHECK(1 <= capture_index && capture_index <= CaptureCount());
@@ -1015,15 +1015,6 @@ class VectorBackedMatch : public String::Match {
                                       CaptureState* state) override {
     DCHECK(has_named_captures_);
 
-    Maybe<bool> maybe_capture_exists =
-        JSReceiver::HasProperty(groups_obj_, name);
-    if (maybe_capture_exists.IsNothing()) return MaybeHandle<String>();
-
-    if (!maybe_capture_exists.FromJust()) {
-      *state = INVALID;
-      return name;  // Arbitrary string handle.
-    }
-
     Handle<Object> capture_obj;
     ASSIGN_RETURN_ON_EXCEPTION(isolate_, capture_obj,
                                Object::GetProperty(isolate_, groups_obj_, name),
@@ -1055,15 +1046,15 @@ Handle<JSObject> ConstructNamedCaptureGroupsObject(
     const std::function<Object(int)>& f_get_capture) {
   Handle<JSObject> groups = isolate->factory()->NewJSObjectWithNullProto();
 
-  const int capture_count = capture_map->length() >> 1;
-  for (int i = 0; i < capture_count; i++) {
+  const int named_capture_count = capture_map->length() >> 1;
+  for (int i = 0; i < named_capture_count; i++) {
     const int name_ix = i * 2;
     const int index_ix = i * 2 + 1;
 
     Handle<String> capture_name(String::cast(capture_map->get(name_ix)),
                                 isolate);
     const int capture_ix = Smi::ToInt(capture_map->get(index_ix));
-    DCHECK(1 <= capture_ix && capture_ix <= capture_count);
+    DCHECK_GE(capture_ix, 1);  // Explicit groups start at index 1.
 
     Handle<Object> capture_value(f_get_capture(capture_ix), isolate);
     DCHECK(capture_value->IsUndefined(isolate) || capture_value->IsString());
@@ -1109,7 +1100,7 @@ static Object SearchRegExpMultiple(Isolate* isolate, Handle<String> subject,
         isolate->heap(), *subject, regexp->data(), &last_match_cache,
         RegExpResultsCache::REGEXP_MULTIPLE_INDICES);
     if (cached_answer.IsFixedArray()) {
-      int capture_registers = (capture_count + 1) * 2;
+      int capture_registers = JSRegExp::RegistersForCaptureCount(capture_count);
       int32_t* last_match = NewArray<int32_t>(capture_registers);
       for (int i = 0; i < capture_registers; i++) {
         last_match[i] = Smi::ToInt(last_match_cache.get(i));
@@ -1234,8 +1225,7 @@ static Object SearchRegExpMultiple(Isolate* isolate, Handle<String> subject,
 
     if (subject_length > kMinLengthToCache) {
       // Store the last successful match into the array for caching.
-      // TODO(yangguo): do not expose last match to JS and simplify caching.
-      int capture_registers = (capture_count + 1) * 2;
+      int capture_registers = JSRegExp::RegistersForCaptureCount(capture_count);
       Handle<FixedArray> last_match_cache =
           isolate->factory()->NewFixedArray(capture_registers);
       int32_t* last_match = global_cache.LastSuccessfulMatch();
@@ -1301,7 +1291,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<String> RegExpReplace(
     }
 
     if (match_indices_obj->IsNull(isolate)) {
-      if (sticky) regexp->set_last_index(Smi::kZero, SKIP_WRITE_BARRIER);
+      if (sticky) regexp->set_last_index(Smi::zero(), SKIP_WRITE_BARRIER);
       return string;
     }
 
@@ -1443,7 +1433,7 @@ RUNTIME_FUNCTION(Runtime_StringReplaceNonGlobalRegExpWithFunction) {
   }
 
   if (match_indices_obj->IsNull(isolate)) {
-    if (sticky) regexp->set_last_index(Smi::kZero, SKIP_WRITE_BARRIER);
+    if (sticky) regexp->set_last_index(Smi::zero(), SKIP_WRITE_BARRIER);
     return *subject;
   }
 

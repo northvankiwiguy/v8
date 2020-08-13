@@ -50,6 +50,89 @@ class BinaryOpAssembler : public CodeStubAssembler {
       TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
       bool rhs_known_smi);
 
+  TNode<Object> Generate_BitwiseOrWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kBitwiseOr, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_BitwiseXorWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kBitwiseXor, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_BitwiseAndWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kBitwiseAnd, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_ShiftLeftWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kShiftLeft, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_ShiftRightWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kShiftRight, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_ShiftRightLogicalWithFeedback(
+      TNode<Context> context, TNode<Object> left, TNode<Object> right,
+      TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
+      bool /* unused */) {
+    TVARIABLE(Smi, feedback);
+    TNode<Object> result = Generate_BitwiseBinaryOpWithFeedback(
+        Operation::kShiftRightLogical, left, right, context, &feedback);
+    UpdateFeedback(feedback.value(), maybe_feedback_vector, slot);
+    return result;
+  }
+
+  TNode<Object> Generate_BitwiseBinaryOpWithFeedback(Operation bitwise_op,
+                                                     TNode<Object> left,
+                                                     TNode<Object> right,
+                                                     TNode<Context> context,
+                                                     TVariable<Smi>* feedback) {
+    return Generate_BitwiseBinaryOpWithOptionalFeedback(bitwise_op, left, right,
+                                                        context, feedback);
+  }
+
+  TNode<Object> Generate_BitwiseBinaryOp(Operation bitwise_op,
+                                         TNode<Object> left,
+                                         TNode<Object> right,
+                                         TNode<Context> context) {
+    return Generate_BitwiseBinaryOpWithOptionalFeedback(bitwise_op, left, right,
+                                                        context, nullptr);
+  }
+
  private:
   using SmiOperation =
       std::function<TNode<Object>(TNode<Smi>, TNode<Smi>, TVariable<Smi>*)>;
@@ -61,6 +144,10 @@ class BinaryOpAssembler : public CodeStubAssembler {
       TNode<UintPtrT> slot, TNode<HeapObject> maybe_feedback_vector,
       const SmiOperation& smiOperation, const FloatOperation& floatOperation,
       Operation op, bool rhs_known_smi);
+
+  TNode<Object> Generate_BitwiseBinaryOpWithOptionalFeedback(
+      Operation bitwise_op, TNode<Object> left, TNode<Object> right,
+      TNode<Context> context, TVariable<Smi>* feedback);
 };
 
 }  // namespace internal

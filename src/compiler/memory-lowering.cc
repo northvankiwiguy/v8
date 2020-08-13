@@ -5,6 +5,7 @@
 #include "src/compiler/memory-lowering.h"
 
 #include "src/codegen/interface-descriptors.h"
+#include "src/common/external-pointer.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/node-matchers.h"
@@ -44,14 +45,14 @@ class MemoryLowering::AllocationGroup final : public ZoneObject {
 };
 
 MemoryLowering::MemoryLowering(JSGraph* jsgraph, Zone* zone,
-                               GraphAssembler* graph_assembler,
+                               JSGraphAssembler* graph_assembler,
                                PoisoningMitigationLevel poisoning_level,
                                AllocationFolding allocation_folding,
                                WriteBarrierAssertFailedCallback callback,
                                const char* function_debug_name)
     : isolate_(jsgraph->isolate()),
       zone_(zone),
-      graph_zone_(jsgraph->graph()->zone()),
+      graph_(jsgraph->graph()),
       common_(jsgraph->common()),
       machine_(jsgraph->machine()),
       graph_assembler_(graph_assembler),
@@ -59,6 +60,8 @@ MemoryLowering::MemoryLowering(JSGraph* jsgraph, Zone* zone,
       poisoning_level_(poisoning_level),
       write_barrier_assert_failed_(callback),
       function_debug_name_(function_debug_name) {}
+
+Zone* MemoryLowering::graph_zone() const { return graph()->zone(); }
 
 Reduction MemoryLowering::Reduce(Node* node) {
   switch (node->opcode()) {
@@ -166,8 +169,8 @@ Reduction MemoryLowering::ReduceAllocateRaw(
       // Compute the effective inner allocated address.
       value = __ BitcastWordToTagged(
           __ IntAdd(state->top(), __ IntPtrConstant(kHeapObjectTag)));
-      effect = gasm()->current_effect();
-      control = gasm()->current_control();
+      effect = gasm()->effect();
+      control = gasm()->control();
 
       // Extend the allocation {group}.
       group->Add(value);
@@ -220,12 +223,12 @@ Reduction MemoryLowering::ReduceAllocateRaw(
       // Compute the initial object address.
       value = __ BitcastWordToTagged(
           __ IntAdd(done.PhiAt(0), __ IntPtrConstant(kHeapObjectTag)));
-      effect = gasm()->current_effect();
-      control = gasm()->current_control();
+      effect = gasm()->effect();
+      control = gasm()->control();
 
       // Start a new allocation group.
       AllocationGroup* group =
-          new (zone()) AllocationGroup(value, allocation_type, size, zone());
+          zone()->New<AllocationGroup>(value, allocation_type, size, zone());
       *state_ptr =
           AllocationState::Open(group, object_size, top, effect, zone());
     }
@@ -268,13 +271,13 @@ Reduction MemoryLowering::ReduceAllocateRaw(
 
     __ Bind(&done);
     value = done.PhiAt(0);
-    effect = gasm()->current_effect();
-    control = gasm()->current_control();
+    effect = gasm()->effect();
+    control = gasm()->control();
 
     if (state_ptr) {
       // Create an unfoldable allocation group.
       AllocationGroup* group =
-          new (zone()) AllocationGroup(value, allocation_type, zone());
+          zone()->New<AllocationGroup>(value, allocation_type, zone());
       *state_ptr = AllocationState::Closed(group, effect, zone());
     }
   }
@@ -303,6 +306,29 @@ Reduction MemoryLowering::ReduceLoadElement(Node* node) {
   return Changed(node);
 }
 
+Node* MemoryLowering::DecodeExternalPointer(Node* node) {
+  DCHECK(V8_HEAP_SANDBOX_BOOL);
+  DCHECK(node->opcode() == IrOpcode::kLoad ||
+         node->opcode() == IrOpcode::kPoisonedLoad);
+  Node* effect = NodeProperties::GetEffectInput(node);
+  Node* control = NodeProperties::GetControlInput(node);
+  __ InitializeEffectControl(effect, control);
+
+  // Clone the load node and put it here.
+  // TODO(turbofan): consider adding GraphAssembler::Clone() suitable for
+  // cloning nodes from arbitrary locaions in effect/control chains.
+  Node* node_copy = __ AddNode(graph()->CloneNode(node));
+
+  // Uncomment this to generate a breakpoint for debugging purposes.
+  // __ DebugBreak();
+
+  // Decode loaded enternal pointer.
+  STATIC_ASSERT(kExternalPointerSize == kSystemPointerSize);
+  Node* salt = __ IntPtrConstant(kExternalPointerSalt);
+  Node* decoded_ptr = __ WordXor(node_copy, salt);
+  return decoded_ptr;
+}
+
 Reduction MemoryLowering::ReduceLoadField(Node* node) {
   DCHECK_EQ(IrOpcode::kLoadField, node->opcode());
   FieldAccess const& access = FieldAccessOf(node->op());
@@ -313,6 +339,13 @@ Reduction MemoryLowering::ReduceLoadField(Node* node) {
     NodeProperties::ChangeOp(node, machine()->PoisonedLoad(type));
   } else {
     NodeProperties::ChangeOp(node, machine()->Load(type));
+  }
+  if (V8_HEAP_SANDBOX_BOOL &&
+      access.type.Is(Type::SandboxedExternalPointer())) {
+    node = DecodeExternalPointer(node);
+    return Replace(node);
+  } else {
+    DCHECK(!access.type.Is(Type::SandboxedExternalPointer()));
   }
   return Changed(node);
 }
@@ -351,6 +384,10 @@ Reduction MemoryLowering::ReduceStoreField(Node* node,
                                            AllocationState const* state) {
   DCHECK_EQ(IrOpcode::kStoreField, node->opcode());
   FieldAccess const& access = FieldAccessOf(node->op());
+  // External pointer must never be stored by optimized code.
+  DCHECK_IMPLIES(V8_HEAP_SANDBOX_BOOL,
+                 !access.type.Is(Type::ExternalPointer()) &&
+                     !access.type.Is(Type::SandboxedExternalPointer()));
   Node* object = node->InputAt(0);
   Node* value = node->InputAt(1);
   WriteBarrierKind write_barrier_kind = ComputeWriteBarrierKind(
@@ -401,13 +438,7 @@ bool ValueNeedsWriteBarrier(Node* value, Isolate* isolate) {
   while (true) {
     switch (value->opcode()) {
       case IrOpcode::kBitcastWordToTaggedSigned:
-      case IrOpcode::kChangeTaggedSignedToCompressedSigned:
-      case IrOpcode::kChangeTaggedToCompressedSigned:
         return false;
-      case IrOpcode::kChangeTaggedPointerToCompressedPointer:
-      case IrOpcode::kChangeTaggedToCompressed:
-        value = NodeProperties::GetValueInput(value, 0);
-        continue;
       case IrOpcode::kHeapConstant: {
         RootIndex root_index;
         if (isolate->roots_table().IsRootHandle(HeapConstantOf(value->op()),

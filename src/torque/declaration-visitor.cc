@@ -6,6 +6,7 @@
 
 #include "src/torque/ast.h"
 #include "src/torque/server-data.h"
+#include "src/torque/type-inference.h"
 #include "src/torque/type-visitor.h"
 
 namespace v8 {
@@ -80,26 +81,30 @@ Builtin* DeclarationVisitor::CreateBuiltin(BuiltinDeclaration* decl,
     for (size_t i = signature.implicit_count;
          i < signature.parameter_types.types.size(); ++i) {
       const Type* parameter_type = signature.parameter_types.types[i];
-      if (parameter_type != TypeOracle::GetJSAnyType()) {
-        Error("Parameters of JavaScript-linkage builtins have to be JSAny.")
+      if (!TypeOracle::GetJSAnyType()->IsSubtypeOf(parameter_type)) {
+        Error(
+            "Parameters of JavaScript-linkage builtins have to be a supertype "
+            "of JSAny.")
             .Position(decl->parameters.types[i]->pos);
       }
     }
   }
 
   for (size_t i = 0; i < signature.types().size(); ++i) {
-    if (const StructType* type =
-            StructType::DynamicCast(signature.types()[i])) {
-      Error("Builtin '", decl->name, "' uses the struct '", type->name(),
-            "' as argument '", signature.parameter_names[i],
-            "', which is not supported.");
+    if (signature.types()[i]->StructSupertype()) {
+      Error("Builtin do not support structs as arguments, but argument ",
+            signature.parameter_names[i], " has type ", *signature.types()[i],
+            ".");
     }
   }
 
-  if (const StructType* struct_type =
-          StructType::DynamicCast(signature.return_type)) {
-    Error("Builtins ", decl->name, " cannot return structs ",
-          struct_type->name());
+  if (signature.return_type->StructSupertype()) {
+    Error("Builtins cannot return structs, but the return type is ",
+          *signature.return_type, ".");
+  }
+
+  if (signature.return_type == TypeOracle::GetVoidType()) {
+    Error("Builtins cannot have return type void.");
   }
 
   return Declarations::CreateBuiltin(std::move(external_name),
@@ -116,24 +121,30 @@ void DeclarationVisitor::Visit(ExternalBuiltinDeclaration* decl) {
 
 void DeclarationVisitor::Visit(ExternalRuntimeDeclaration* decl) {
   Signature signature = TypeVisitor::MakeSignature(decl);
-  if (signature.parameter_types.types.size() == 0 ||
-      !(signature.parameter_types.types[0] == TypeOracle::GetContextType())) {
+  if (signature.parameter_types.types.size() == 0) {
+    ReportError(
+        "Missing parameters for runtime function, at least the context "
+        "parameter is required.");
+  }
+  if (!(signature.parameter_types.types[0] == TypeOracle::GetContextType() ||
+        signature.parameter_types.types[0] == TypeOracle::GetNoContextType())) {
     ReportError(
         "first parameter to runtime functions has to be the context and have "
-        "type Context, but found type ",
-        signature.parameter_types.types[0]);
+        "type Context or NoContext, but found type ",
+        *signature.parameter_types.types[0]);
   }
-  if (!(signature.return_type->IsSubtypeOf(TypeOracle::GetObjectType()) ||
+  if (!(signature.return_type->IsSubtypeOf(TypeOracle::GetStrongTaggedType()) ||
         signature.return_type == TypeOracle::GetVoidType() ||
         signature.return_type == TypeOracle::GetNeverType())) {
     ReportError(
-        "runtime functions can only return tagged values, but found type ",
+        "runtime functions can only return strong tagged values, but "
+        "found type ",
         signature.return_type);
   }
   for (const Type* parameter_type : signature.parameter_types.types) {
-    if (!parameter_type->IsSubtypeOf(TypeOracle::GetObjectType())) {
+    if (!parameter_type->IsSubtypeOf(TypeOracle::GetStrongTaggedType())) {
       ReportError(
-          "runtime functions can only take tagged values as parameters, but "
+          "runtime functions can only take strong tagged parameters, but "
           "found type ",
           *parameter_type);
     }
@@ -182,6 +193,13 @@ void DeclarationVisitor::Visit(SpecializationDeclaration* decl) {
   GenericCallable* matching_generic = nullptr;
   Signature signature_with_types = TypeVisitor::MakeSignature(decl);
   for (GenericCallable* generic : generic_list) {
+    // This argument inference is just to trigger constraint checking on the
+    // generic arguments.
+    TypeArgumentInference inference = generic->InferSpecializationTypes(
+        TypeVisitor::ComputeTypeVector(decl->generic_parameters), {});
+    if (inference.HasFailed()) {
+      continue;
+    }
     Signature generic_signature_with_types =
         MakeSpecializedSignature(SpecializationKey<GenericCallable>{
             generic, TypeVisitor::ComputeTypeVector(decl->generic_parameters)});
@@ -261,7 +279,7 @@ void DeclarationVisitor::DeclareSpecializedTypes(
   }
 
   for (auto type : key.specialized_types) {
-    Identifier* generic_type_name = key.generic->generic_parameters()[i++];
+    Identifier* generic_type_name = key.generic->generic_parameters()[i++].name;
     TypeAlias* alias = Declarations::DeclareType(generic_type_name, type);
     alias->SetIsUserDefined(false);
   }
@@ -287,10 +305,14 @@ Callable* DeclarationVisitor::SpecializeImplicit(
                 " with types <", key.specialized_types, "> declared at ",
                 key.generic->Position());
   }
+  SpecializationRequester requester{CurrentSourcePosition::Get(),
+                                    CurrentScope::Get(), ""};
   CurrentScope::Scope generic_scope(key.generic->ParentScope());
   Callable* result = Specialize(key, key.generic->declaration(), base::nullopt,
                                 body, CurrentSourcePosition::Get());
   result->SetIsUserDefined(false);
+  requester.name = result->ReadableName();
+  result->SetSpecializationRequester(requester);
   CurrentScope::Scope callable_scope(result);
   DeclareSpecializedTypes(key);
   return result;
@@ -312,7 +334,7 @@ Callable* DeclarationVisitor::Specialize(
            << std::to_string(generic_parameter_count) << ")";
     ReportError(stream.str());
   }
-  if (key.generic->specializations().Get(key.specialized_types)) {
+  if (key.generic->GetSpecialization(key.specialized_types)) {
     ReportError("cannot redeclare specialization of ", key.generic->name(),
                 " with types <", key.specialized_types, ">");
   }
@@ -347,13 +369,15 @@ Callable* DeclarationVisitor::Specialize(
         CreateBuiltin(builtin, GlobalContext::MakeUniqueName(generated_name),
                       readable_name.str(), type_signature, *body);
   }
-  key.generic->specializations().Add(key.specialized_types, callable);
+  key.generic->AddSpecialization(key.specialized_types, callable);
   return callable;
 }
 
 void PredeclarationVisitor::ResolvePredeclarations() {
-  for (auto& p : GlobalContext::AllDeclarables()) {
-    if (const TypeAlias* alias = TypeAlias::DynamicCast(p.get())) {
+  const auto& all_declarables = GlobalContext::AllDeclarables();
+  for (size_t i = 0; i < all_declarables.size(); ++i) {
+    Declarable* declarable = all_declarables[i].get();
+    if (const TypeAlias* alias = TypeAlias::DynamicCast(declarable)) {
       CurrentScope::Scope scope_activator(alias->ParentScope());
       CurrentSourcePosition::Scope position_activator(alias->Position());
       alias->Resolve();

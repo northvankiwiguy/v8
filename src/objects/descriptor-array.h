@@ -5,8 +5,10 @@
 #ifndef V8_OBJECTS_DESCRIPTOR_ARRAY_H_
 #define V8_OBJECTS_DESCRIPTOR_ARRAY_H_
 
+#include "src/common/globals.h"
 #include "src/objects/fixed-array.h"
 // TODO(jkummerow): Consider forward-declaring instead.
+#include "src/base/bit-field.h"
 #include "src/objects/internal-index.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
@@ -48,13 +50,13 @@ class EnumCache : public TorqueGeneratedEnumCache<EnumCache, Struct> {
 // The "value" fields store either values or field types. A field type is either
 // FieldType::None(), FieldType::Any() or a weak reference to a Map. All other
 // references are strong.
-class DescriptorArray : public HeapObject {
+class DescriptorArray
+    : public TorqueGeneratedDescriptorArray<DescriptorArray, HeapObject> {
  public:
   DECL_INT16_ACCESSORS(number_of_all_descriptors)
   DECL_INT16_ACCESSORS(number_of_descriptors)
   inline int16_t number_of_slack_descriptors() const;
   inline int number_of_entries() const;
-  DECL_ACCESSORS(enum_cache, EnumCache)
 
   void ClearEnumCache();
   inline void CopyEnumCacheFrom(DescriptorArray array);
@@ -65,21 +67,22 @@ class DescriptorArray : public HeapObject {
 
   // Accessors for fetching instance descriptor at descriptor number.
   inline Name GetKey(InternalIndex descriptor_number) const;
-  inline Name GetKey(Isolate* isolate, InternalIndex descriptor_number) const;
+  inline Name GetKey(const Isolate* isolate,
+                     InternalIndex descriptor_number) const;
   inline Object GetStrongValue(InternalIndex descriptor_number);
-  inline Object GetStrongValue(Isolate* isolate,
+  inline Object GetStrongValue(const Isolate* isolate,
                                InternalIndex descriptor_number);
   inline MaybeObject GetValue(InternalIndex descriptor_number);
-  inline MaybeObject GetValue(Isolate* isolate,
+  inline MaybeObject GetValue(const Isolate* isolate,
                               InternalIndex descriptor_number);
   inline PropertyDetails GetDetails(InternalIndex descriptor_number);
   inline int GetFieldIndex(InternalIndex descriptor_number);
   inline FieldType GetFieldType(InternalIndex descriptor_number);
-  inline FieldType GetFieldType(Isolate* isolate,
+  inline FieldType GetFieldType(const Isolate* isolate,
                                 InternalIndex descriptor_number);
 
   inline Name GetSortedKey(int descriptor_number);
-  inline Name GetSortedKey(Isolate* isolate, int descriptor_number);
+  inline Name GetSortedKey(const Isolate* isolate, int descriptor_number);
   inline int GetSortedKeyIndex(int descriptor_number);
 
   // Accessor for complete descriptor.
@@ -112,9 +115,13 @@ class DescriptorArray : public HeapObject {
   // Sort the instance descriptors by the hash codes of their keys.
   void Sort();
 
-  // Search the instance descriptors for given name.
-  V8_INLINE InternalIndex Search(Name name, int number_of_own_descriptors);
-  V8_INLINE InternalIndex Search(Name name, Map map);
+  // Search the instance descriptors for given name. {concurrent_search} signals
+  // if we are doing the search on a background thread. If so, we will sacrifice
+  // speed for thread-safety.
+  V8_INLINE InternalIndex Search(Name name, int number_of_own_descriptors,
+                                 bool concurrent_search = false);
+  V8_INLINE InternalIndex Search(Name name, Map map,
+                                 bool concurrent_search = false);
 
   // As the above, but uses DescriptorLookupCache and updates it when
   // necessary.
@@ -124,21 +131,17 @@ class DescriptorArray : public HeapObject {
 
   // Allocates a DescriptorArray, but returns the singleton
   // empty descriptor array object if number_of_descriptors is 0.
-  V8_EXPORT_PRIVATE static Handle<DescriptorArray> Allocate(Isolate* isolate,
-                                                            int nof_descriptors,
-                                                            int slack);
+  template <typename LocalIsolate>
+  V8_EXPORT_PRIVATE static Handle<DescriptorArray> Allocate(
+      LocalIsolate* isolate, int nof_descriptors, int slack,
+      AllocationType allocation = AllocationType::kYoung);
 
   void Initialize(EnumCache enum_cache, HeapObject undefined_value,
                   int nof_descriptors, int slack);
 
-  DECL_CAST(DescriptorArray)
-
   // Constant for denoting key was not found.
   static const int kNotFound = -1;
 
-  // Layout description.
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize,
-                                TORQUE_GENERATED_DESCRIPTOR_ARRAY_FIELDS)
   STATIC_ASSERT(IsAligned(kStartOfWeakFieldsOffset, kTaggedSize));
   STATIC_ASSERT(IsAligned(kHeaderSize, kTaggedSize));
 
@@ -154,7 +157,7 @@ class DescriptorArray : public HeapObject {
     return OffsetOfDescriptorAt(number_of_all_descriptors);
   }
   static constexpr int OffsetOfDescriptorAt(int descriptor) {
-    return kHeaderSize + descriptor * kEntrySize * kTaggedSize;
+    return kDescriptorsOffset + descriptor * kEntrySize * kTaggedSize;
   }
   inline ObjectSlot GetFirstPointerSlot();
   inline ObjectSlot GetDescriptorSlot(int descriptor);
@@ -163,6 +166,8 @@ class DescriptorArray : public HeapObject {
                 "Weak fields follow strong fields.");
   static_assert(kEndOfWeakFieldsOffset == kHeaderSize,
                 "Weak fields extend up to the end of the header.");
+  static_assert(kDescriptorsOffset == kHeaderSize,
+                "Variable-size array follows header.");
   // We use this visitor to also visitor to also visit the enum_cache, which is
   // the only tagged field in the header, and placed at the end of the header.
   using BodyDescriptor = FlexibleWeakBodyDescriptor<kStartOfStrongFieldsOffset>;
@@ -188,7 +193,7 @@ class DescriptorArray : public HeapObject {
 
 #ifdef DEBUG
   // Is the descriptor array sorted and without duplicates?
-  V8_EXPORT_PRIVATE bool IsSortedNoDuplicates(int valid_descriptors = -1);
+  V8_EXPORT_PRIVATE bool IsSortedNoDuplicates();
 
   // Are two DescriptorArrays equal?
   bool IsEqualTo(DescriptorArray other);
@@ -228,7 +233,7 @@ class DescriptorArray : public HeapObject {
   // Swap first and second descriptor.
   inline void SwapSortedKeys(int first, int second);
 
-  OBJECT_CONSTRUCTORS(DescriptorArray, HeapObject);
+  TQ_OBJECT_CONSTRUCTORS(DescriptorArray)
 };
 
 class NumberOfMarkedDescriptors {

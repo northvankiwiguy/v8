@@ -185,8 +185,7 @@ MaybeHandle<Cell> SourceTextModule::ResolveExport(
     if (result.second) {
       // |module| wasn't in the map previously, so allocate a new name set.
       Zone* zone = resolve_set->zone();
-      name_set =
-          new (zone->New(sizeof(UnorderedStringSet))) UnorderedStringSet(zone);
+      name_set = zone->New<UnorderedStringSet>(zone);
     } else if (name_set->count(export_name)) {
       // Cycle detected.
       if (must_resolve) {
@@ -369,9 +368,14 @@ bool SourceTextModule::RunInitializationCode(Isolate* isolate,
   Handle<JSFunction> function(JSFunction::cast(module->code()), isolate);
   DCHECK_EQ(MODULE_SCOPE, function->shared().scope_info().scope_type());
   Handle<Object> receiver = isolate->factory()->undefined_value();
-  Handle<Object> argv[] = {module};
+
+  Handle<ScopeInfo> scope_info(function->shared().scope_info(), isolate);
+  Handle<Context> context = isolate->factory()->NewModuleContext(
+      module, isolate->native_context(), scope_info);
+  function->set_context(*context);
+
   MaybeHandle<Object> maybe_generator =
-      Execution::Call(isolate, function, receiver, arraysize(argv), argv);
+      Execution::Call(isolate, function, receiver, 0, {});
   Handle<Object> generator;
   if (!maybe_generator.ToHandle(&generator)) {
     DCHECK(isolate->has_pending_exception());
@@ -578,6 +582,19 @@ Handle<JSModuleNamespace> SourceTextModule::GetModuleNamespace(
   return Module::GetModuleNamespace(isolate, requested_module);
 }
 
+MaybeHandle<JSObject> SourceTextModule::GetImportMeta(
+    Isolate* isolate, Handle<SourceTextModule> module) {
+  Handle<HeapObject> import_meta(module->import_meta(), isolate);
+  if (import_meta->IsTheHole(isolate)) {
+    if (!isolate->RunHostInitializeImportMetaObjectCallback(module).ToHandle(
+            &import_meta)) {
+      return {};
+    }
+    module->set_import_meta(*import_meta);
+  }
+  return Handle<JSObject>::cast(import_meta);
+}
+
 MaybeHandle<Object> SourceTextModule::EvaluateMaybeAsync(
     Isolate* isolate, Handle<SourceTextModule> module) {
   // In the event of errored evaluation, return a rejected promise.
@@ -624,6 +641,16 @@ MaybeHandle<Object> SourceTextModule::EvaluateMaybeAsync(
   // 9. If result is an abrupt completion, then
   Handle<Object> unused_result;
   if (!Evaluate(isolate, module).ToHandle(&unused_result)) {
+    // If the exception was a termination exception, rejecting the promise
+    // would resume execution, and our API contract is to return an empty
+    // handle. The module's status should be set to kErrored and the
+    // exception field should be set to `null`.
+    if (!isolate->is_catchable_by_javascript(isolate->pending_exception())) {
+      DCHECK_EQ(module->status(), kErrored);
+      DCHECK_EQ(module->exception(), *isolate->factory()->null_value());
+      return {};
+    }
+
     //  d. Perform ! Call(capability.[[Reject]], undefined,
     //                    «result.[[Value]]»).
     isolate->clear_pending_exception();
@@ -669,7 +696,14 @@ MaybeHandle<Object> SourceTextModule::Evaluate(
       // iii. Set m.[[EvaluationError]] to result.
       descendant->RecordErrorUsingPendingException(isolate);
     }
-    DCHECK_EQ(module->exception(), isolate->pending_exception());
+
+#ifdef DEBUG
+    if (isolate->is_catchable_by_javascript(isolate->pending_exception())) {
+      CHECK_EQ(module->exception(), isolate->pending_exception());
+    } else {
+      CHECK_EQ(module->exception(), *isolate->factory()->null_value());
+    }
+#endif  // DEBUG
   } else {
     // 10. Otherwise,
     //  c. Assert: stack is empty.
@@ -770,6 +804,8 @@ void SourceTextModule::AsyncModuleExecutionFulfilled(
 void SourceTextModule::AsyncModuleExecutionRejected(
     Isolate* isolate, Handle<SourceTextModule> module,
     Handle<Object> exception) {
+  DCHECK(isolate->is_catchable_by_javascript(*exception));
+
   // 1. Assert: module.[[Status]] is "evaluated".
   CHECK(module->status() == kEvaluated || module->status() == kErrored);
 
@@ -887,7 +923,9 @@ MaybeHandle<Object> SourceTextModule::InnerExecuteAsyncModule(
   Handle<Object> result;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, result,
-      Execution::Call(isolate, resume, async_function_object, 0, nullptr),
+      Execution::TryCall(isolate, resume, async_function_object, 0, nullptr,
+                         Execution::MessageHandling::kKeepPending, nullptr,
+                         false),
       Object);
   return result;
 }
@@ -900,9 +938,21 @@ MaybeHandle<Object> SourceTextModule::ExecuteModule(
   Handle<JSFunction> resume(
       isolate->native_context()->generator_next_internal(), isolate);
   Handle<Object> result;
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, result, Execution::Call(isolate, resume, generator, 0, nullptr),
-      Object);
+
+  // With top_level_await, we need to catch any exceptions and reject
+  // the top level capability.
+  if (FLAG_harmony_top_level_await) {
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, result,
+        Execution::TryCall(isolate, resume, generator, 0, nullptr,
+                           Execution::MessageHandling::kKeepPending, nullptr,
+                           false),
+        Object);
+  } else {
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, result,
+        Execution::Call(isolate, resume, generator, 0, nullptr), Object);
+  }
   DCHECK(JSIteratorResult::cast(*result).done().BooleanValue(isolate));
   return handle(JSIteratorResult::cast(*result).value(), isolate);
 }
@@ -1021,7 +1071,7 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
         module->IncrementPendingAsyncDependencies();
 
         //      2. Append module to requiredModule.[[AsyncParentModules]].
-        required_module->AddAsyncParentModule(isolate, module);
+        AddAsyncParentModule(isolate, required_module, module);
       }
     } else {
       RETURN_ON_EXCEPTION(isolate, Module::Evaluate(isolate, requested_module),

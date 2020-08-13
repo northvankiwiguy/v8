@@ -21,7 +21,7 @@ namespace internal {
 namespace {
 
 bool IsUninitializedLiteralSite(Object literal_site) {
-  return literal_site == Smi::kZero;
+  return literal_site == Smi::zero();
 }
 
 bool HasBoilerplate(Handle<Object> literal_site) {
@@ -415,7 +415,7 @@ Handle<JSObject> CreateObjectLiteral(
     if (key->ToArrayIndex(&element_index)) {
       // Array index (uint32).
       if (value->IsUninitialized(isolate)) {
-        value = handle(Smi::kZero, isolate);
+        value = handle(Smi::zero(), isolate);
       }
       JSObject::SetOwnElementIgnoreAttributes(boilerplate, element_index, value,
                                               NONE)
@@ -589,7 +589,7 @@ RUNTIME_FUNCTION(Runtime_CreateObjectLiteral) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
   CONVERT_ARG_HANDLE_CHECKED(HeapObject, maybe_vector, 0);
-  CONVERT_SMI_ARG_CHECKED(literals_index, 1);
+  CONVERT_TAGGED_INDEX_ARG_CHECKED(literals_index, 1);
   CONVERT_ARG_HANDLE_CHECKED(ObjectBoilerplateDescription, description, 2);
   CONVERT_SMI_ARG_CHECKED(flags, 3);
   Handle<FeedbackVector> vector;
@@ -627,7 +627,7 @@ RUNTIME_FUNCTION(Runtime_CreateArrayLiteral) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
   CONVERT_ARG_HANDLE_CHECKED(HeapObject, maybe_vector, 0);
-  CONVERT_SMI_ARG_CHECKED(literals_index, 1);
+  CONVERT_TAGGED_INDEX_ARG_CHECKED(literals_index, 1);
   CONVERT_ARG_HANDLE_CHECKED(ArrayBoilerplateDescription, elements, 2);
   CONVERT_SMI_ARG_CHECKED(flags, 3);
   Handle<FeedbackVector> vector;
@@ -645,7 +645,7 @@ RUNTIME_FUNCTION(Runtime_CreateRegExpLiteral) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
   CONVERT_ARG_HANDLE_CHECKED(HeapObject, maybe_vector, 0);
-  CONVERT_SMI_ARG_CHECKED(index, 1);
+  CONVERT_TAGGED_INDEX_ARG_CHECKED(index, 1);
   CONVERT_ARG_HANDLE_CHECKED(String, pattern, 2);
   CONVERT_SMI_ARG_CHECKED(flags, 3);
 

@@ -12,6 +12,8 @@
 #include "src/objects/instance-type.h"
 
 namespace v8 {
+class CFunctionInfo;
+
 namespace internal {
 
 class BytecodeArray;
@@ -61,6 +63,7 @@ enum class OddballType : uint8_t {
   V(NativeContext)                 \
   /* Subtypes of FixedArray */     \
   V(Context)                       \
+  V(ObjectBoilerplateDescription)  \
   V(ScopeInfo)                     \
   V(ScriptContextTable)            \
   /* Subtypes of FixedArrayBase */ \
@@ -90,7 +93,6 @@ enum class OddballType : uint8_t {
   V(JSReceiver)                    \
   V(Map)                           \
   V(Name)                          \
-  V(ObjectBoilerplateDescription)  \
   V(PropertyCell)                  \
   V(SharedFunctionInfo)            \
   V(SourceTextModule)              \
@@ -133,6 +135,7 @@ class V8_EXPORT_PRIVATE ObjectRef {
 #undef HEAP_AS_METHOD_DECL
 
   bool IsNullOrUndefined() const;
+  bool IsTheHole() const;
 
   bool BooleanValue() const;
   Maybe<double> OddballToNumber() const;
@@ -317,6 +320,7 @@ class V8_EXPORT_PRIVATE JSFunctionRef : public JSObjectRef {
   bool has_feedback_vector() const;
   bool has_initial_map() const;
   bool has_prototype() const;
+  bool HasAttachedOptimizedCode() const;
   bool PrototypeRequiresRuntimeLookup() const;
 
   void Serialize();
@@ -329,6 +333,7 @@ class V8_EXPORT_PRIVATE JSFunctionRef : public JSObjectRef {
   NativeContextRef native_context() const;
   SharedFunctionInfoRef shared() const;
   FeedbackVectorRef feedback_vector() const;
+  CodeRef code() const;
   int InitialMapInstanceSizeWithMinSlack() const;
 };
 
@@ -375,50 +380,49 @@ class ContextRef : public HeapObjectRef {
       int index, SerializationPolicy policy =
                      SerializationPolicy::kAssumeSerialized) const;
 
+  SourceTextModuleRef GetModule(SerializationPolicy policy) const;
+
   // We only serialize the ScopeInfo if certain Promise
   // builtins are called.
   void SerializeScopeInfo();
   base::Optional<ScopeInfoRef> scope_info() const;
 };
 
-#define BROKER_COMPULSORY_NATIVE_CONTEXT_FIELDS(V)                    \
-  V(JSFunction, array_function)                                       \
-  V(JSFunction, boolean_function)                                     \
-  V(JSFunction, bigint_function)                                      \
-  V(JSFunction, number_function)                                      \
-  V(JSFunction, object_function)                                      \
-  V(JSFunction, promise_function)                                     \
-  V(JSFunction, promise_then)                                         \
-  V(JSFunction, string_function)                                      \
-  V(JSFunction, symbol_function)                                      \
-  V(JSGlobalObject, global_object)                                    \
-  V(JSGlobalProxy, global_proxy_object)                               \
-  V(JSObject, promise_prototype)                                      \
-  V(Map, block_context_map)                                           \
-  V(Map, bound_function_with_constructor_map)                         \
-  V(Map, bound_function_without_constructor_map)                      \
-  V(Map, catch_context_map)                                           \
-  V(Map, eval_context_map)                                            \
-  V(Map, fast_aliased_arguments_map)                                  \
-  V(Map, function_context_map)                                        \
-  V(Map, initial_array_iterator_map)                                  \
-  V(Map, initial_string_iterator_map)                                 \
-  V(Map, iterator_result_map)                                         \
-  V(Map, js_array_holey_double_elements_map)                          \
-  V(Map, js_array_holey_elements_map)                                 \
-  V(Map, js_array_holey_smi_elements_map)                             \
-  V(Map, js_array_packed_double_elements_map)                         \
-  V(Map, js_array_packed_elements_map)                                \
-  V(Map, js_array_packed_smi_elements_map)                            \
-  V(Map, sloppy_arguments_map)                                        \
-  V(Map, slow_object_with_null_prototype_map)                         \
-  V(Map, strict_arguments_map)                                        \
-  V(Map, with_context_map)                                            \
-  V(ScriptContextTable, script_context_table)                         \
-  V(SharedFunctionInfo, promise_capability_default_reject_shared_fun) \
-  V(SharedFunctionInfo, promise_catch_finally_shared_fun)             \
-  V(SharedFunctionInfo, promise_then_finally_shared_fun)              \
-  V(SharedFunctionInfo, promise_capability_default_resolve_shared_fun)
+#define BROKER_COMPULSORY_NATIVE_CONTEXT_FIELDS(V) \
+  V(JSFunction, array_function)                    \
+  V(JSFunction, boolean_function)                  \
+  V(JSFunction, bigint_function)                   \
+  V(JSFunction, number_function)                   \
+  V(JSFunction, object_function)                   \
+  V(JSFunction, promise_function)                  \
+  V(JSFunction, promise_then)                      \
+  V(JSFunction, regexp_function)                   \
+  V(JSFunction, string_function)                   \
+  V(JSFunction, symbol_function)                   \
+  V(JSGlobalObject, global_object)                 \
+  V(JSGlobalProxy, global_proxy_object)            \
+  V(JSObject, promise_prototype)                   \
+  V(Map, block_context_map)                        \
+  V(Map, bound_function_with_constructor_map)      \
+  V(Map, bound_function_without_constructor_map)   \
+  V(Map, catch_context_map)                        \
+  V(Map, eval_context_map)                         \
+  V(Map, fast_aliased_arguments_map)               \
+  V(Map, function_context_map)                     \
+  V(Map, initial_array_iterator_map)               \
+  V(Map, initial_string_iterator_map)              \
+  V(Map, iterator_result_map)                      \
+  V(Map, js_array_holey_double_elements_map)       \
+  V(Map, js_array_holey_elements_map)              \
+  V(Map, js_array_holey_smi_elements_map)          \
+  V(Map, js_array_packed_double_elements_map)      \
+  V(Map, js_array_packed_elements_map)             \
+  V(Map, js_array_packed_smi_elements_map)         \
+  V(Map, sloppy_arguments_map)                     \
+  V(Map, slow_object_with_null_prototype_map)      \
+  V(Map, strict_arguments_map)                     \
+  V(Map, with_context_map)                         \
+  V(ScriptContextTable, script_context_table)
 
 // Those are set by Bootstrapper::ExportFromRuntime, which may not yet have
 // happened when Turbofan is invoked via --always-opt.
@@ -467,14 +471,6 @@ class ScriptContextTableRef : public HeapObjectRef {
   DEFINE_REF_CONSTRUCTOR(ScriptContextTable, HeapObjectRef)
 
   Handle<ScriptContextTable> object() const;
-
-  struct LookupResult {
-    ContextRef context;
-    bool immutable;
-    int index;
-  };
-
-  base::Optional<LookupResult> lookup(const NameRef& name) const;
 };
 
 class DescriptorArrayRef : public HeapObjectRef {
@@ -489,7 +485,7 @@ class FeedbackCellRef : public HeapObjectRef {
   DEFINE_REF_CONSTRUCTOR(FeedbackCell, HeapObjectRef)
 
   Handle<FeedbackCell> object() const;
-
+  base::Optional<SharedFunctionInfoRef> shared_function_info() const;
   HeapObjectRef value() const;
 };
 
@@ -499,9 +495,11 @@ class FeedbackVectorRef : public HeapObjectRef {
 
   Handle<FeedbackVector> object() const;
 
+  SharedFunctionInfoRef shared_function_info() const;
   double invocation_count() const;
 
   void Serialize();
+  bool serialized() const;
   FeedbackCellRef GetClosureFeedbackCell(int index) const;
 };
 
@@ -624,7 +622,8 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
   FieldIndex GetFieldIndexFor(InternalIndex descriptor_index) const;
   ObjectRef GetFieldType(InternalIndex descriptor_index) const;
   bool IsUnboxedDoubleField(InternalIndex descriptor_index) const;
-  ObjectRef GetStrongValue(InternalIndex descriptor_number) const;
+  base::Optional<ObjectRef> GetStrongValue(
+      InternalIndex descriptor_number) const;
 
   void SerializeRootMap();
   base::Optional<MapRef> FindRootMap() const;
@@ -657,6 +656,8 @@ class FunctionTemplateInfoRef : public HeapObjectRef {
 
   void SerializeCallCode();
   base::Optional<CallHandlerInfoRef> call_code() const;
+  Address c_function() const;
+  const CFunctionInfo* c_signature() const;
 
   HolderLookupResult LookupHolderOfExpectedType(
       MapRef receiver_map,
@@ -722,8 +723,7 @@ class BytecodeArrayRef : public FixedArrayBaseRef {
   Address GetFirstBytecodeAddress() const;
 
   // Source position table.
-  const byte* source_positions_address() const;
-  int source_positions_size() const;
+  Handle<ByteArray> source_positions() const;
 
   // Constant pool access.
   Handle<Object> GetConstantAtIndex(int index) const;
@@ -759,6 +759,13 @@ class ScopeInfoRef : public HeapObjectRef {
   Handle<ScopeInfo> object() const;
 
   int ContextLength() const;
+  bool HasOuterScopeInfo() const;
+  int Flags() const;
+  bool HasContextExtension() const;
+
+  // Only serialized via SerializeScopeInfoChain.
+  ScopeInfoRef OuterScopeInfo() const;
+  void SerializeScopeInfoChain();
 };
 
 #define BROKER_SFI_FIELDS(V)                             \
@@ -796,9 +803,6 @@ class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
     return GetInlineability() == SharedFunctionInfo::kIsInlineable;
   }
 
-  bool IsSerializedForCompilation(FeedbackVectorRef feedback) const;
-  void SetSerializedForCompilation(FeedbackVectorRef feedback);
-
   // Template objects may not be created at compilation time. This method
   // wraps the retrieval of the template object and creates it if
   // necessary.
@@ -808,6 +812,9 @@ class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
 
   void SerializeFunctionTemplateInfo();
   base::Optional<FunctionTemplateInfoRef> function_template_info() const;
+
+  void SerializeScopeInfoChain();
+  ScopeInfoRef scope_info() const;
 };
 
 class StringRef : public NameRef {
@@ -855,6 +862,7 @@ class SourceTextModuleRef : public HeapObjectRef {
   void Serialize();
 
   base::Optional<CellRef> GetCell(int cell_index) const;
+  ObjectRef import_meta() const;
 };
 
 class TemplateObjectDescriptionRef : public HeapObjectRef {
@@ -905,6 +913,8 @@ class CodeRef : public HeapObjectRef {
   DEFINE_REF_CONSTRUCTOR(Code, HeapObjectRef)
 
   Handle<Code> object() const;
+
+  unsigned inlined_bytecode_size() const;
 };
 
 class InternalizedStringRef : public StringRef {

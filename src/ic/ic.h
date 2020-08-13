@@ -82,6 +82,8 @@ class IC {
   // Configure the vector for POLYMORPHIC.
   void ConfigureVectorState(Handle<Name> name, MapHandles const& maps,
                             MaybeObjectHandles* handlers);
+  void ConfigureVectorState(
+      Handle<Name> name, std::vector<MapAndHandler> const& maps_and_handlers);
 
   char TransitionMarkFromState(IC::State state);
   void TraceIC(const char* type, Handle<Object> name);
@@ -183,7 +185,8 @@ class LoadIC : public IC {
   }
 
   V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(Handle<Object> object,
-                                                 Handle<Name> name);
+                                                 Handle<Name> name,
+                                                 bool update_feedback = true);
 
  protected:
   // Update the inline cache and the global stub cache based on the
@@ -203,7 +206,8 @@ class LoadGlobalIC : public LoadIC {
                FeedbackSlot slot, FeedbackSlotKind kind)
       : LoadIC(isolate, vector, slot, kind) {}
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(Handle<Name> name);
+  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(Handle<Name> name,
+                                                 bool update_feedback = true);
 };
 
 class KeyedLoadIC : public LoadIC {
@@ -310,12 +314,13 @@ class KeyedStoreIC : public StoreIC {
   Handle<Map> ComputeTransitionedMap(Handle<Map> map,
                                      TransitionMode transition_mode);
 
-  Handle<Object> StoreElementHandler(Handle<Map> receiver_map,
-                                     KeyedAccessStoreMode store_mode);
+  Handle<Object> StoreElementHandler(
+      Handle<Map> receiver_map, KeyedAccessStoreMode store_mode,
+      MaybeHandle<Object> prev_validity_cell = MaybeHandle<Object>());
 
-  void StoreElementPolymorphicHandlers(MapHandles* receiver_maps,
-                                       MaybeObjectHandles* handlers,
-                                       KeyedAccessStoreMode store_mode);
+  void StoreElementPolymorphicHandlers(
+      std::vector<MapAndHandler>* receiver_maps_and_handlers,
+      KeyedAccessStoreMode store_mode);
 
   friend class IC;
 };

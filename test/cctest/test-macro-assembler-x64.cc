@@ -187,7 +187,7 @@ void TestSmiCompare(MacroAssembler* masm, Label* exit, int id, int x, int y) {
 TEST(SmiCompare) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope handles(isolate);
-  auto buffer = AllocateAssemblerBuffer(2 * Assembler::kMinimalBufferSize);
+  auto buffer = AllocateAssemblerBuffer(2 * Assembler::kDefaultBufferSize);
   MacroAssembler assembler(isolate, v8::internal::CodeObjectRequired::kYes,
                            buffer->CreateView());
 
@@ -243,7 +243,7 @@ TEST(SmiTag) {
   __ movq(rax, Immediate(1));  // Test number.
   __ movq(rcx, Immediate(0));
   __ SmiTag(rcx);
-  __ Set(rdx, Smi::kZero.ptr());
+  __ Set(rdx, Smi::zero().ptr());
   __ cmp_tagged(rcx, rdx);
   __ j(not_equal, &exit);
 
@@ -449,7 +449,8 @@ TEST(EmbeddedObj) {
 
   CodeDesc desc;
   masm->GetCode(isolate, &desc);
-  Handle<Code> code = Factory::CodeBuilder(isolate, desc, Code::STUB).Build();
+  Handle<Code> code =
+      Factory::CodeBuilder(isolate, desc, CodeKind::STUB).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
   code->Print(os);

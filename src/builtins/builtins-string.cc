@@ -40,14 +40,16 @@ bool IsValidCodePoint(Isolate* isolate, Handle<Object> value) {
   return true;
 }
 
+static constexpr uc32 kInvalidCodePoint = static_cast<uc32>(-1);
+
 uc32 NextCodePoint(Isolate* isolate, BuiltinArguments args, int index) {
   Handle<Object> value = args.at(1 + index);
-  ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, value,
-                                   Object::ToNumber(isolate, value), -1);
+  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+      isolate, value, Object::ToNumber(isolate, value), kInvalidCodePoint);
   if (!IsValidCodePoint(isolate, value)) {
     isolate->Throw(*isolate->factory()->NewRangeError(
         MessageTemplate::kInvalidCodePoint, value));
-    return -1;
+    return kInvalidCodePoint;
   }
   return DoubleToUint32(value->Number());
 }
@@ -69,7 +71,7 @@ BUILTIN(StringFromCodePoint) {
   int index;
   for (index = 0; index < length; index++) {
     code = NextCodePoint(isolate, args, index);
-    if (code < 0) {
+    if (code == kInvalidCodePoint) {
       return ReadOnlyRoots(isolate).exception();
     }
     if (code > String::kMaxOneByteCharCode) {
@@ -99,7 +101,7 @@ BUILTIN(StringFromCodePoint) {
       break;
     }
     code = NextCodePoint(isolate, args, index);
-    if (code < 0) {
+    if (code == kInvalidCodePoint) {
       return ReadOnlyRoots(isolate).exception();
     }
   }
@@ -155,13 +157,13 @@ BUILTIN(StringPrototypeLocaleCompare) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, str2,
                                      Object::ToString(isolate, args.at(1)));
 
-  if (str1.is_identical_to(str2)) return Smi::kZero;  // Equal.
+  if (str1.is_identical_to(str2)) return Smi::zero();  // Equal.
   int str1_length = str1->length();
   int str2_length = str2->length();
 
   // Decide trivial cases without flattening.
   if (str1_length == 0) {
-    if (str2_length == 0) return Smi::kZero;  // Equal.
+    if (str2_length == 0) return Smi::zero();  // Equal.
     return Smi::FromInt(-str2_length);
   } else {
     if (str2_length == 0) return Smi::FromInt(str1_length);

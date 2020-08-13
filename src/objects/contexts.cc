@@ -9,6 +9,7 @@
 #include "src/execution/isolate-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/string-set-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -16,7 +17,7 @@ namespace internal {
 Handle<ScriptContextTable> ScriptContextTable::Extend(
     Handle<ScriptContextTable> table, Handle<Context> script_context) {
   Handle<ScriptContextTable> result;
-  int used = table->used();
+  int used = table->synchronized_used();
   int length = table->length();
   CHECK(used >= 0 && length > 0 && used < length);
   if (used + kFirstContextSlotIndex == length) {
@@ -29,11 +30,21 @@ Handle<ScriptContextTable> ScriptContextTable::Extend(
   } else {
     result = table;
   }
-  result->set_used(used + 1);
-
   DCHECK(script_context->IsScriptContext());
   result->set(used + kFirstContextSlotIndex, *script_context);
+
+  result->synchronized_set_used(used + 1);
   return result;
+}
+
+void Context::Initialize(Isolate* isolate) {
+  ScopeInfo scope_info = this->scope_info();
+  int header = scope_info.ContextHeaderLength();
+  for (int var = 0; var < scope_info.ContextLocalCount(); var++) {
+    if (scope_info.ContextLocalInitFlag(var) == kNeedsInitialization) {
+      set(header + var, ReadOnlyRoots(isolate).the_hole_value());
+    }
+  }
 }
 
 bool ScriptContextTable::Lookup(Isolate* isolate, ScriptContextTable table,
@@ -41,7 +52,7 @@ bool ScriptContextTable::Lookup(Isolate* isolate, ScriptContextTable table,
   DisallowHeapAllocation no_gc;
   // Static variables cannot be in script contexts.
   IsStaticFlag is_static_flag;
-  for (int i = 0; i < table.used(); i++) {
+  for (int i = 0; i < table.synchronized_used(); i++) {
     Context context = table.get_context(i);
     DCHECK(context.IsScriptContext());
     int slot_index = ScopeInfo::ContextSlotIndex(
@@ -135,11 +146,11 @@ JSGlobalProxy Context::global_proxy() {
  * Lookups a property in an object environment, taking the unscopables into
  * account. This is used For HasBinding spec algorithms for ObjectEnvironment.
  */
-static Maybe<bool> UnscopableLookup(LookupIterator* it) {
+static Maybe<bool> UnscopableLookup(LookupIterator* it, bool is_with_context) {
   Isolate* isolate = it->isolate();
 
   Maybe<bool> found = JSReceiver::HasProperty(it);
-  if (found.IsNothing() || !found.FromJust()) return found;
+  if (!is_with_context || found.IsNothing() || !found.FromJust()) return found;
 
   Handle<Object> unscopables;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
@@ -149,13 +160,13 @@ static Maybe<bool> UnscopableLookup(LookupIterator* it) {
                               isolate->factory()->unscopables_symbol()),
       Nothing<bool>());
   if (!unscopables->IsJSReceiver()) return Just(true);
-  Handle<Object> blacklist;
+  Handle<Object> blocklist;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-      isolate, blacklist,
+      isolate, blocklist,
       JSReceiver::GetProperty(isolate, Handle<JSReceiver>::cast(unscopables),
                               it->name()),
       Nothing<bool>());
-  return Just(!blacklist->BooleanValue(isolate));
+  return Just(!blocklist->BooleanValue(isolate));
 }
 
 static PropertyAttributes GetAttributesForMode(VariableMode mode) {
@@ -234,7 +245,7 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
       if ((flags & FOLLOW_PROTOTYPE_CHAIN) == 0 ||
           object->IsJSContextExtensionObject()) {
         maybe = JSReceiver::GetOwnPropertyAttributes(object, name);
-      } else if (context->IsWithContext()) {
+      } else {
         // A with context will never bind "this", but debug-eval may look into
         // a with context when resolving "this". Other synthetic variables such
         // as new.target may be resolved as VariableMode::kDynamicLocal due to
@@ -243,10 +254,11 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
         // TODO(v8:5405): Replace this check with a DCHECK when resolution of
         // of synthetic variables does not go through this code path.
         if (ScopeInfo::VariableIsSynthetic(*name)) {
+          DCHECK(context->IsWithContext());
           maybe = Just(ABSENT);
         } else {
-          LookupIterator it(object, name, object);
-          Maybe<bool> found = UnscopableLookup(&it);
+          LookupIterator it(isolate, object, name, object);
+          Maybe<bool> found = UnscopableLookup(&it, context->IsWithContext());
           if (found.IsNothing()) {
             maybe = Nothing<PropertyAttributes>();
           } else {
@@ -256,8 +268,6 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
             maybe = Just(found.FromJust() ? NONE : ABSENT);
           }
         }
-      } else {
-        maybe = JSReceiver::GetPropertyAttributes(object, name);
       }
 
       if (maybe.IsNothing()) return Handle<Object>();
@@ -290,6 +300,17 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
                                       &maybe_assigned_flag, &is_static_flag);
       DCHECK(slot_index < 0 || slot_index >= MIN_CONTEXT_SLOTS);
       if (slot_index >= 0) {
+        // Re-direct lookup to the ScriptContextTable in case we find a hole in
+        // a REPL script context. REPL scripts allow re-declaration of
+        // script-level let bindings. The value itself is stored in the script
+        // context of the first script that declared a variable, all other
+        // script contexts will contain 'the hole' for that particular name.
+        if (scope_info.IsReplModeScope() &&
+            context->get(slot_index).IsTheHole(isolate)) {
+          context = Handle<Context>(context->previous(), isolate);
+          continue;
+        }
+
         if (FLAG_trace_contexts) {
           PrintF("=> found local in context slot %d (mode = %hhu)\n",
                  slot_index, static_cast<uint8_t>(mode));
@@ -349,7 +370,7 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
       Object ext = context->get(EXTENSION_INDEX);
       if (ext.IsJSReceiver()) {
         Handle<JSReceiver> extension(JSReceiver::cast(ext), isolate);
-        LookupIterator it(extension, name, extension);
+        LookupIterator it(isolate, extension, name, extension);
         Maybe<bool> found = JSReceiver::HasProperty(&it);
         if (found.FromMaybe(false)) {
           *attributes = NONE;
@@ -357,12 +378,12 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
         }
       }
 
-      // Check blacklist. Names that are listed, cannot be resolved further.
-      Object blacklist = context->get(BLACK_LIST_INDEX);
-      if (blacklist.IsStringSet() &&
-          StringSet::cast(blacklist).Has(isolate, name)) {
+      // Check blocklist. Names that are listed, cannot be resolved further.
+      Object blocklist = context->get(BLOCK_LIST_INDEX);
+      if (blocklist.IsStringSet() &&
+          StringSet::cast(blocklist).Has(isolate, name)) {
         if (FLAG_trace_contexts) {
-          PrintF(" - name is blacklisted. Aborting.\n");
+          PrintF(" - name is blocklisted. Aborting.\n");
         }
         break;
       }
@@ -391,7 +412,7 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
 }
 
 void NativeContext::AddOptimizedCode(Code code) {
-  DCHECK(code.kind() == Code::OPTIMIZED_FUNCTION);
+  DCHECK(CodeKindCanDeoptimize(code.kind()));
   DCHECK(code.next_code_link().IsUndefined());
   code.set_next_code_link(get(OPTIMIZED_CODE_LIST));
   set(OPTIMIZED_CODE_LIST, code, UPDATE_WEAK_WRITE_BARRIER);
@@ -431,8 +452,12 @@ int Context::IntrinsicIndexForName(Handle<String> string) {
 
 #undef COMPARE_NAME
 
-#define COMPARE_NAME(index, type, name) \
-  if (strncmp(string, #name, length) == 0) return index;
+#define COMPARE_NAME(index, type, name)                                      \
+  {                                                                          \
+    const int name_length = static_cast<int>(arraysize(#name)) - 1;          \
+    if ((length == name_length) && strncmp(string, #name, name_length) == 0) \
+      return index;                                                          \
+  }
 
 int Context::IntrinsicIndexForName(const unsigned char* unsigned_string,
                                    int length) {

@@ -33,6 +33,7 @@ from testrunner.testproc.rerun import RerunProc
 from testrunner.testproc.shard import ShardProc
 from testrunner.testproc.sigproc import SignalProc
 from testrunner.testproc.timeout import TimeoutProc
+from testrunner.testproc import util
 
 
 BASE_DIR = (
@@ -61,7 +62,6 @@ TEST_MAP = {
     "wasm-js",
     "fuzzer",
     "message",
-    "preparser",
     "intl",
     "unittests",
     "wasm-api-tests",
@@ -77,7 +77,6 @@ TEST_MAP = {
     "wasm-js",
     "fuzzer",
     "message",
-    "preparser",
     "intl",
     "unittests",
     "wasm-api-tests",
@@ -88,7 +87,6 @@ TEST_MAP = {
     "mjsunit",
     "webkit",
     "message",
-    "preparser",
     "intl",
   ],
   # This needs to stay in sync with "v8_optimize_for_size" in test/BUILD.gn.
@@ -105,15 +103,17 @@ TEST_MAP = {
   ],
 }
 
-# Double the timeout for these:
-SLOW_ARCHS = ["arm",
-              "mips",
-              "mipsel",
-              "mips64",
-              "mips64el",
-              "s390",
-              "s390x",
-              "arm64"]
+# Increase the timeout for these:
+SLOW_ARCHS = [
+  "arm",
+  "arm64",
+  "mips",
+  "mipsel",
+  "mips64",
+  "mips64el",
+  "s390",
+  "s390x",
+]
 
 
 class ModeConfig(object):
@@ -124,9 +124,8 @@ class ModeConfig(object):
     self.execution_mode = execution_mode
 
 
-DEBUG_FLAGS = ["--nohard-abort", "--enable-slow-asserts", "--verify-heap",
-               "--testing-d8-test-runner"]
-RELEASE_FLAGS = ["--nohard-abort", "--testing-d8-test-runner"]
+DEBUG_FLAGS = ["--nohard-abort", "--enable-slow-asserts", "--verify-heap"]
+RELEASE_FLAGS = ["--nohard-abort"]
 MODES = {
   "debug": ModeConfig(
     flags=DEBUG_FLAGS,
@@ -170,6 +169,7 @@ PROGRESS_INDICATORS = {
   'dots': progress.DotsProgressIndicator,
   'color': progress.ColorProgressIndicator,
   'mono': progress.MonochromeProgressIndicator,
+  'stream': progress.StreamProgressIndicator,
 }
 
 class TestRunnerError(Exception):
@@ -267,6 +267,9 @@ class BaseTestRunner(object):
         # this less cryptic by printing it ourselves.
         print(' '.join(sys.argv))
 
+        # Kill stray processes from previous tasks on swarming.
+        util.kill_processes_linux()
+
       self._load_build_config(options)
       command.setup(self.target_os, options.device)
 
@@ -346,6 +349,8 @@ class BaseTestRunner(object):
                            "color, mono)")
     parser.add_option("--json-test-results",
                       help="Path to a file for storing json results.")
+    parser.add_option('--slow-tests-cutoff', type="int", default=100,
+                      help='Collect N slowest tests')
     parser.add_option("--exit-after-n-failures", type="int", default=100,
                       help="Exit after the first N failures instead of "
                            "running all tests. Pass 0 to disable this feature.")
@@ -379,6 +384,8 @@ class BaseTestRunner(object):
                       help="Timeout for single test in seconds")
     parser.add_option("-v", "--verbose", default=False, action="store_true",
                       help="Verbose output")
+    parser.add_option('--regenerate-expected-files', default=False, action='store_true',
+                      help='Regenerate expected files')
 
     # TODO(machenbach): Temporary options for rolling out new test runner
     # features.
@@ -674,6 +681,7 @@ class BaseTestRunner(object):
       "arch": self.build_config.arch,
       "asan": self.build_config.asan,
       "byteorder": sys.byteorder,
+      "cfi_vptr": self.build_config.cfi_vptr,
       "dcheck_always_on": self.build_config.dcheck_always_on,
       "deopt_fuzzer": False,
       "endurance_fuzzer": False,
@@ -703,13 +711,17 @@ class BaseTestRunner(object):
       "pointer_compression": self.build_config.pointer_compression,
     }
 
+  def _runner_flags(self):
+    """Extra default flags specific to the test runner implementation."""
+    return []
+
   def _create_test_config(self, options):
     timeout = options.timeout * self._timeout_scalefactor(options)
     return TestConfig(
         command_prefix=options.command_prefix,
         extra_flags=options.extra_flags,
         isolates=options.isolates,
-        mode_flags=self.mode_options.flags,
+        mode_flags=self.mode_options.flags + self._runner_flags(),
         no_harness=options.no_harness,
         noi18n=self.build_config.no_i18n,
         random_seed=options.random_seed,
@@ -717,13 +729,14 @@ class BaseTestRunner(object):
         shell_dir=self.outdir,
         timeout=timeout,
         verbose=options.verbose,
+        regenerate_expected_files=options.regenerate_expected_files,
     )
 
   def _timeout_scalefactor(self, options):
     """Increases timeout for slow build configurations."""
     factor = self.mode_options.timeout_scalefactor
     if self.build_config.arch in SLOW_ARCHS:
-      factor *= 4
+      factor *= 4.5
     if self.build_config.lite_mode:
       factor *= 2
     if self.build_config.predictable:
@@ -793,7 +806,6 @@ class BaseTestRunner(object):
     if options.json_test_results:
       procs.append(progress.JsonTestProgressIndicator(
         self.framework_name,
-        options.json_test_results,
         self.build_config.arch,
         self.mode_options.execution_mode))
 

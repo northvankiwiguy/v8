@@ -4,7 +4,6 @@
 
 #include "src/objects/lookup.h"
 
-#include "include/v8config.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/protectors-inl.h"
@@ -15,71 +14,27 @@
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/struct-inl.h"
+#include "torque-generated/exported-class-definitions-tq-inl.h"
+#include "torque-generated/exported-class-definitions-tq.h"
 
 namespace v8 {
 namespace internal {
 
-// static
-LookupIterator LookupIterator::PropertyOrElement(
-    Isolate* isolate, Handle<Object> receiver, Handle<Object> key,
-    bool* success, Handle<JSReceiver> holder, Configuration configuration) {
-  uint32_t index = 0;
-  if (key->ToArrayIndex(&index)) {
+LookupIterator::Key::Key(Isolate* isolate, Handle<Object> key, bool* success) {
+  if (key->ToIntegerIndex(&index_)) {
     *success = true;
-    return LookupIterator(isolate, receiver, index, holder, configuration);
+    return;
   }
-
-  Handle<Name> name;
-  *success = Object::ToName(isolate, key).ToHandle(&name);
+  *success = Object::ToName(isolate, key).ToHandle(&name_);
   if (!*success) {
     DCHECK(isolate->has_pending_exception());
-    // Return an unusable dummy.
-    return LookupIterator(isolate, receiver,
-                          isolate->factory()->empty_string());
+    index_ = kInvalidIndex;
+    return;
   }
-
-  if (name->AsArrayIndex(&index)) {
-    LookupIterator it(isolate, receiver, index, holder, configuration);
-    // Here we try to avoid having to rebuild the string later
-    // by storing it on the indexed LookupIterator.
-    it.name_ = name;
-    return it;
+  if (!name_->AsIntegerIndex(&index_)) {
+    // {AsIntegerIndex} may modify {index_} before deciding to fail.
+    index_ = LookupIterator::kInvalidIndex;
   }
-
-  return LookupIterator(receiver, name, holder, configuration);
-}
-
-// static
-LookupIterator LookupIterator::PropertyOrElement(Isolate* isolate,
-                                                 Handle<Object> receiver,
-                                                 Handle<Object> key,
-                                                 bool* success,
-                                                 Configuration configuration) {
-  // TODO(mslekova): come up with better way to avoid duplication
-  uint32_t index = 0;
-  if (key->ToArrayIndex(&index)) {
-    *success = true;
-    return LookupIterator(isolate, receiver, index, configuration);
-  }
-
-  Handle<Name> name;
-  *success = Object::ToName(isolate, key).ToHandle(&name);
-  if (!*success) {
-    DCHECK(isolate->has_pending_exception());
-    // Return an unusable dummy.
-    return LookupIterator(isolate, receiver,
-                          isolate->factory()->empty_string());
-  }
-
-  if (name->AsArrayIndex(&index)) {
-    LookupIterator it(isolate, receiver, index, configuration);
-    // Here we try to avoid having to rebuild the string later
-    // by storing it on the indexed LookupIterator.
-    it.name_ = name;
-    return it;
-  }
-
-  return LookupIterator(isolate, receiver, name, configuration);
 }
 
 LookupIterator::LookupIterator(Isolate* isolate, Handle<Object> receiver,
@@ -95,7 +50,7 @@ LookupIterator::LookupIterator(Isolate* isolate, Handle<Object> receiver,
       transition_(transition_map),
       receiver_(receiver),
       initial_holder_(GetRoot(isolate, receiver)),
-      index_(kMaxUInt32) {
+      index_(kInvalidIndex) {
   holder_ = initial_holder_;
 }
 
@@ -172,11 +127,11 @@ template void LookupIterator::RestartInternal<false>(InterceptorState);
 
 // static
 Handle<JSReceiver> LookupIterator::GetRootForNonJSReceiver(
-    Isolate* isolate, Handle<Object> receiver, uint32_t index) {
+    Isolate* isolate, Handle<Object> receiver, size_t index) {
   // Strings are the only objects with properties (only elements) directly on
   // the wrapper. Hence we can skip generating the wrapper for all other cases.
   if (receiver->IsString(isolate) &&
-      index < static_cast<uint32_t>(String::cast(*receiver).length())) {
+      index < static_cast<size_t>(String::cast(*receiver).length())) {
     // TODO(verwaest): Speed this up. Perhaps use a cached wrapper on the native
     // context, ensuring that we don't leak it into JS?
     Handle<JSFunction> constructor = isolate->string_function();
@@ -184,7 +139,7 @@ Handle<JSReceiver> LookupIterator::GetRootForNonJSReceiver(
     Handle<JSPrimitiveWrapper>::cast(result)->set_value(*receiver);
     return result;
   }
-  auto root = handle(
+  Handle<HeapObject> root(
       receiver->GetPrototypeChainRootMap(isolate).prototype(isolate), isolate);
   if (root->IsNull(isolate)) {
     isolate->PushStackTraceAndDie(reinterpret_cast<void*>(receiver->ptr()));
@@ -239,21 +194,11 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
   if (!receiver_generic->IsHeapObject()) return;
   Handle<HeapObject> receiver = Handle<HeapObject>::cast(receiver_generic);
 
-  // Getting the native_context from the isolate as a fallback. If possible, we
-  // use the receiver's creation context instead.
-  Handle<NativeContext> native_context = isolate->native_context();
-
   ReadOnlyRoots roots(isolate);
   if (*name == roots.constructor_string()) {
-    // Fetching the context in here since the operation is rather expensive.
-    if (receiver->IsJSReceiver()) {
-      native_context = Handle<JSReceiver>::cast(receiver)->GetCreationContext();
-    }
-
     if (!Protectors::IsArraySpeciesLookupChainIntact(isolate) &&
         !Protectors::IsPromiseSpeciesLookupChainIntact(isolate) &&
-        !Protectors::IsRegExpSpeciesLookupChainProtectorIntact(
-            native_context) &&
+        !Protectors::IsRegExpSpeciesLookupChainIntact(isolate) &&
         !Protectors::IsTypedArraySpeciesLookupChainIntact(isolate)) {
       return;
     }
@@ -269,12 +214,8 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
       Protectors::InvalidatePromiseSpeciesLookupChain(isolate);
       return;
     } else if (receiver->IsJSRegExp(isolate)) {
-      if (!Protectors::IsRegExpSpeciesLookupChainProtectorIntact(
-              native_context)) {
-        return;
-      }
-      Protectors::InvalidateRegExpSpeciesLookupChainProtector(isolate,
-                                                              native_context);
+      if (!Protectors::IsRegExpSpeciesLookupChainIntact(isolate)) return;
+      Protectors::InvalidateRegExpSpeciesLookupChain(isolate);
       return;
     } else if (receiver->IsJSTypedArray(isolate)) {
       if (!Protectors::IsTypedArraySpeciesLookupChainIntact(isolate)) return;
@@ -300,12 +241,8 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
         Protectors::InvalidatePromiseSpeciesLookupChain(isolate);
       } else if (isolate->IsInAnyContext(*receiver,
                                          Context::REGEXP_PROTOTYPE_INDEX)) {
-        if (!Protectors::IsRegExpSpeciesLookupChainProtectorIntact(
-                native_context)) {
-          return;
-        }
-        Protectors::InvalidateRegExpSpeciesLookupChainProtector(isolate,
-                                                                native_context);
+        if (!Protectors::IsRegExpSpeciesLookupChainIntact(isolate)) return;
+        Protectors::InvalidateRegExpSpeciesLookupChain(isolate);
       } else if (isolate->IsInAnyContext(
                      receiver->map(isolate).prototype(isolate),
                      Context::TYPED_ARRAY_PROTOTYPE_INDEX)) {
@@ -341,15 +278,9 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
       Protectors::InvalidateStringIteratorLookupChain(isolate);
     }
   } else if (*name == roots.species_symbol()) {
-    // Fetching the context in here since the operation is rather expensive.
-    if (receiver->IsJSReceiver()) {
-      native_context = Handle<JSReceiver>::cast(receiver)->GetCreationContext();
-    }
-
     if (!Protectors::IsArraySpeciesLookupChainIntact(isolate) &&
         !Protectors::IsPromiseSpeciesLookupChainIntact(isolate) &&
-        !Protectors::IsRegExpSpeciesLookupChainProtectorIntact(
-            native_context) &&
+        !Protectors::IsRegExpSpeciesLookupChainIntact(isolate) &&
         !Protectors::IsTypedArraySpeciesLookupChainIntact(isolate)) {
       return;
     }
@@ -366,12 +297,8 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
       Protectors::InvalidatePromiseSpeciesLookupChain(isolate);
     } else if (isolate->IsInAnyContext(*receiver,
                                        Context::REGEXP_FUNCTION_INDEX)) {
-      if (!Protectors::IsRegExpSpeciesLookupChainProtectorIntact(
-              native_context)) {
-        return;
-      }
-      Protectors::InvalidateRegExpSpeciesLookupChainProtector(isolate,
-                                                              native_context);
+      if (!Protectors::IsRegExpSpeciesLookupChainIntact(isolate)) return;
+      Protectors::InvalidateRegExpSpeciesLookupChain(isolate);
     } else if (IsTypedArrayFunctionInAnyContext(isolate, *receiver)) {
       if (!Protectors::IsTypedArraySpeciesLookupChainIntact(isolate)) return;
       Protectors::InvalidateTypedArraySpeciesLookupChain(isolate);
@@ -452,7 +379,7 @@ void LookupIterator::PrepareForDataProperty(Handle<Object> value) {
 
   Handle<JSObject> holder_obj = Handle<JSObject>::cast(holder);
 
-  if (IsElement()) {
+  if (IsElement(*holder)) {
     ElementsKind kind = holder_obj->GetElementsKind(isolate_);
     ElementsKind to = value->OptimalElementsKind(isolate_);
     if (IsHoleyElementsKind(kind)) to = GetHoleyElementsKind(to);
@@ -531,7 +458,7 @@ void LookupIterator::ReconfigureDataProperty(Handle<Object> value,
   }
 
   Handle<JSObject> holder_obj = Handle<JSObject>::cast(holder);
-  if (IsElement()) {
+  if (IsElement(*holder)) {
     DCHECK(!holder_obj->HasTypedArrayElements(isolate_));
     DCHECK(attributes != NONE || !holder_obj->HasFastElements(isolate_));
     Handle<FixedArrayBase> elements(holder_obj->elements(isolate_), isolate());
@@ -556,7 +483,7 @@ void LookupIterator::ReconfigureDataProperty(Handle<Object> value,
     ReloadPropertyInformation<false>();
   }
 
-  if (!IsElement() && !holder_obj->HasFastProperties(isolate_)) {
+  if (!IsElement(*holder) && !holder_obj->HasFastProperties(isolate_)) {
     PropertyDetails details(kData, attributes, PropertyCellType::kMutable);
     if (holder_obj->map(isolate_).is_prototype_map() &&
         (property_details_.attributes() & READ_ONLY) == 0 &&
@@ -583,8 +510,7 @@ void LookupIterator::ReconfigureDataProperty(Handle<Object> value,
       int enumeration_index = original_details.dictionary_index();
       DCHECK_GT(enumeration_index, 0);
       details = details.set_index(enumeration_index);
-      dictionary->SetEntry(isolate(), dictionary_entry(), *name(), *value,
-                           details);
+      dictionary->SetEntry(dictionary_entry(), *name(), *value, details);
       property_details_ = details;
     }
     state_ = DATA;
@@ -624,25 +550,15 @@ void LookupIterator::PrepareTransitionToDataProperty(
   if (map->is_dictionary_map()) {
     state_ = TRANSITION;
     if (map->IsJSGlobalObjectMap()) {
-      // Install a property cell.
-      Handle<JSGlobalObject> global = Handle<JSGlobalObject>::cast(receiver);
-      Handle<PropertyCell> cell = JSGlobalObject::EnsureEmptyPropertyCell(
-          global, name(), PropertyCellType::kUninitialized, &number_);
-      Handle<GlobalDictionary> dictionary(global->global_dictionary(isolate_),
-                                          isolate_);
+      Handle<PropertyCell> cell = isolate_->factory()->NewPropertyCell(name());
       DCHECK(cell->value(isolate_).IsTheHole(isolate_));
       DCHECK(!value->IsTheHole(isolate_));
-      transition_ = cell;
-      // Assign an enumeration index to the property and update
-      // SetNextEnumerationIndex.
-      int index = dictionary->NextEnumerationIndex();
-      dictionary->SetNextEnumerationIndex(index + 1);
+      // Don't set enumeration index (it will be set during value store).
       property_details_ = PropertyDetails(
-          kData, attributes, PropertyCellType::kUninitialized, index);
-      PropertyCellType new_type =
-          PropertyCell::UpdatedType(isolate(), cell, value, property_details_);
-      property_details_ = property_details_.set_cell_type(new_type);
-      cell->set_property_details(property_details_);
+          kData, attributes,
+          PropertyCell::TypeForUninitializedCell(isolate_, value));
+
+      transition_ = cell;
       has_property_ = true;
     } else {
       // Don't set enumeration index (it will be set during value store).
@@ -677,6 +593,21 @@ void LookupIterator::ApplyTransitionToDataProperty(
   holder_ = receiver;
   if (receiver->IsJSGlobalObject(isolate_)) {
     JSObject::InvalidatePrototypeChains(receiver->map(isolate_));
+
+    // Install a property cell.
+    Handle<JSGlobalObject> global = Handle<JSGlobalObject>::cast(receiver);
+    DCHECK(!global->HasFastProperties());
+    Handle<GlobalDictionary> dictionary(global->global_dictionary(isolate_),
+                                        isolate_);
+
+    dictionary =
+        GlobalDictionary::Add(isolate_, dictionary, name(), transition_cell(),
+                              property_details_, &number_);
+    global->set_global_dictionary(*dictionary);
+
+    // Reload details containing proper enumeration index value.
+    property_details_ = transition_cell()->property_details();
+    has_property_ = true;
     state_ = DATA;
     return;
   }
@@ -725,7 +656,7 @@ void LookupIterator::ApplyTransitionToDataProperty(
 
 void LookupIterator::Delete() {
   Handle<JSReceiver> holder = Handle<JSReceiver>::cast(holder_);
-  if (IsElement()) {
+  if (IsElement(*holder)) {
     Handle<JSObject> object = Handle<JSObject>::cast(holder);
     ElementsAccessor* accessor = object->GetElementsAccessor(isolate_);
     accessor->Delete(object, number_);
@@ -765,7 +696,7 @@ void LookupIterator::TransitionToAccessorProperty(
     attributes = static_cast<PropertyAttributes>(attributes | DONT_ENUM);
   }
 
-  if (!IsElement() && !receiver->map(isolate_).is_dictionary_map()) {
+  if (!IsElement(*receiver) && !receiver->map(isolate_).is_dictionary_map()) {
     Handle<Map> old_map(receiver->map(isolate_), isolate_);
 
     if (!holder_.is_identical_to(receiver)) {
@@ -801,7 +732,7 @@ void LookupIterator::TransitionToAccessorProperty(
     // If the component and attributes are identical, nothing has to be done.
     if (pair->Equals(*getter, *setter)) {
       if (property_details().attributes() == attributes) {
-        if (!IsElement()) JSObject::ReoptimizeIfPrototype(receiver);
+        if (!IsElement(*receiver)) JSObject::ReoptimizeIfPrototype(receiver);
         return;
       }
     } else {
@@ -829,23 +760,24 @@ void LookupIterator::TransitionToAccessorPair(Handle<Object> pair,
 
   PropertyDetails details(kAccessor, attributes, PropertyCellType::kMutable);
 
-  if (IsElement()) {
+  if (IsElement(*receiver)) {
     // TODO(verwaest): Move code into the element accessor.
     isolate_->CountUsage(v8::Isolate::kIndexAccessor);
     Handle<NumberDictionary> dictionary = JSObject::NormalizeElements(receiver);
 
-    dictionary = NumberDictionary::Set(isolate_, dictionary, index_, pair,
-                                       receiver, details);
+    dictionary = NumberDictionary::Set(isolate_, dictionary, array_index(),
+                                       pair, receiver, details);
     receiver->RequireSlowElements(*dictionary);
 
     if (receiver->HasSlowArgumentsElements(isolate_)) {
-      FixedArray parameter_map = FixedArray::cast(receiver->elements(isolate_));
-      uint32_t length = parameter_map.length() - 2;
+      SloppyArgumentsElements parameter_map =
+          SloppyArgumentsElements::cast(receiver->elements(isolate_));
+      uint32_t length = parameter_map.length();
       if (number_.is_found() && number_.as_uint32() < length) {
-        parameter_map.set(number_.as_int() + 2,
-                          ReadOnlyRoots(isolate_).the_hole_value());
+        parameter_map.set_mapped_entries(
+            number_.as_int(), ReadOnlyRoots(isolate_).the_hole_value());
       }
-      FixedArray::cast(receiver->elements(isolate_)).set(1, *dictionary);
+      parameter_map.set_arguments(*dictionary);
     } else {
       receiver->set_elements(*dictionary);
     }
@@ -886,9 +818,10 @@ bool LookupIterator::HolderIsReceiverOrHiddenPrototype() const {
              isolate_) == *holder_;
 }
 
-Handle<Object> LookupIterator::FetchValue() const {
+Handle<Object> LookupIterator::FetchValue(
+    AllocationPolicy allocation_policy) const {
   Object result;
-  if (IsElement()) {
+  if (IsElement(*holder_)) {
     Handle<JSObject> holder = GetHolder<JSObject>();
     ElementsAccessor* accessor = holder->GetElementsAccessor(isolate_);
     return accessor->Get(holder, number_);
@@ -904,6 +837,10 @@ Handle<Object> LookupIterator::FetchValue() const {
     Handle<JSObject> holder = GetHolder<JSObject>();
     FieldIndex field_index =
         FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
+    if (allocation_policy == AllocationPolicy::kAllocationDisallowed &&
+        field_index.is_inobject() && field_index.is_double()) {
+      return isolate_->factory()->undefined_value();
+    }
     return JSObject::FastPropertyAt(holder, property_details_.representation(),
                                     field_index);
   } else {
@@ -915,10 +852,16 @@ Handle<Object> LookupIterator::FetchValue() const {
 }
 
 bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
-  DCHECK(!IsElement());
+  DCHECK(!IsElement(*holder_));
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(kField, property_details_.location());
   DCHECK_EQ(PropertyConstness::kConst, property_details_.constness());
+  if (value.IsUninitialized(isolate())) {
+    // Storing uninitialized value means that we are preparing for a computed
+    // property value in an object literal. The initializing store will follow
+    // and it will properly update constness based on the actual value.
+    return true;
+  }
   Handle<JSObject> holder = GetHolder<JSObject>();
   FieldIndex field_index =
       FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
@@ -932,7 +875,7 @@ bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
       DCHECK(current_value.IsHeapNumber(isolate_));
       bits = HeapNumber::cast(current_value).value_as_bits();
     }
-    // Use bit representation of double to to check for hole double, since
+    // Use bit representation of double to check for hole double, since
     // manipulating the signaling NaN used for the hole in C++, e.g. with
     // bit_cast or value(), will change its value on ia32 (the x87 stack is
     // used to return values and stores to the stack silently clear the
@@ -973,22 +916,17 @@ Handle<Map> LookupIterator::GetFieldOwnerMap() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(kField, property_details_.location());
-  DCHECK(!IsElement());
+  DCHECK(!IsElement(*holder_));
   Map holder_map = holder_->map(isolate_);
   return handle(holder_map.FindFieldOwner(isolate(), descriptor_number()),
                 isolate_);
 }
 
-#if defined(__clang__) && defined(V8_OS_WIN)
-// Force function alignment to work around CPU bug: https://crbug.com/968683
-__attribute__((__aligned__(32)))
-#endif
-FieldIndex
-LookupIterator::GetFieldIndex() const {
+FieldIndex LookupIterator::GetFieldIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(kField, property_details_.location());
-  DCHECK(!IsElement());
+  DCHECK(!IsElement(*holder_));
   return FieldIndex::ForDescriptor(holder_->map(isolate_), descriptor_number());
 }
 
@@ -1003,7 +941,7 @@ Handle<FieldType> LookupIterator::GetFieldType() const {
 }
 
 Handle<PropertyCell> LookupIterator::GetPropertyCell() const {
-  DCHECK(!IsElement());
+  DCHECK(!IsElement(*holder_));
   Handle<JSGlobalObject> holder = GetHolder<JSGlobalObject>();
   return handle(
       holder->global_dictionary(isolate_).CellAt(isolate_, dictionary_entry()),
@@ -1015,9 +953,10 @@ Handle<Object> LookupIterator::GetAccessors() const {
   return FetchValue();
 }
 
-Handle<Object> LookupIterator::GetDataValue() const {
+Handle<Object> LookupIterator::GetDataValue(
+    AllocationPolicy allocation_policy) const {
   DCHECK_EQ(DATA, state_);
-  Handle<Object> value = FetchValue();
+  Handle<Object> value = FetchValue(allocation_policy);
   return value;
 }
 
@@ -1025,7 +964,7 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
                                     bool initializing_store) {
   DCHECK_EQ(DATA, state_);
   Handle<JSReceiver> holder = GetHolder<JSReceiver>();
-  if (IsElement()) {
+  if (IsElement(*holder)) {
     Handle<JSObject> object = Handle<JSObject>::cast(holder);
     ElementsAccessor* accessor = object->GetElementsAccessor(isolate_);
     accessor->Set(object, number_, *value);
@@ -1055,7 +994,7 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
 
 template <bool is_element>
 bool LookupIterator::SkipInterceptor(JSObject holder) {
-  InterceptorInfo info = GetInterceptor<is_element>(isolate_, holder);
+  InterceptorInfo info = GetInterceptor<is_element>(holder);
   if (!is_element && name_->IsSymbol(isolate_) &&
       !info.can_intercept_symbols()) {
     return true;
@@ -1086,9 +1025,9 @@ JSReceiver LookupIterator::NextHolder(Map map) {
 }
 
 LookupIterator::State LookupIterator::NotFound(JSReceiver const holder) const {
-  DCHECK(!IsElement());
-  if (!holder.IsJSTypedArray(isolate_) || !name_->IsString(isolate_))
-    return NOT_FOUND;
+  if (!holder.IsJSTypedArray(isolate_)) return NOT_FOUND;
+  if (IsElement()) return INTEGER_INDEXED_EXOTIC;
+  if (!name_->IsString(isolate_)) return NOT_FOUND;
   return IsSpecialIndex(String::cast(*name_)) ? INTEGER_INDEXED_EXOTIC
                                               : NOT_FOUND;
 }
@@ -1096,9 +1035,18 @@ LookupIterator::State LookupIterator::NotFound(JSReceiver const holder) const {
 namespace {
 
 template <bool is_element>
-bool HasInterceptor(Map map) {
-  return is_element ? map.has_indexed_interceptor()
-                    : map.has_named_interceptor();
+bool HasInterceptor(Map map, size_t index) {
+  if (is_element) {
+    if (index > JSArray::kMaxArrayIndex) {
+      // There is currently no way to install interceptors on an object with
+      // typed array elements.
+      DCHECK(!map.has_typed_array_elements());
+      return map.has_named_interceptor();
+    }
+    return map.has_indexed_interceptor();
+  } else {
+    return map.has_named_interceptor();
+  }
 }
 
 }  // namespace
@@ -1117,13 +1065,13 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
       }
       V8_FALLTHROUGH;
     case ACCESS_CHECK:
-      if (check_interceptor() && HasInterceptor<is_element>(map) &&
+      if (check_interceptor() && HasInterceptor<is_element>(map, index_) &&
           !SkipInterceptor<is_element>(JSObject::cast(holder))) {
         if (is_element || !name_->IsPrivate(isolate_)) return INTERCEPTOR;
       }
       V8_FALLTHROUGH;
     case INTERCEPTOR:
-      if (!is_element && map.IsJSGlobalObjectMap()) {
+      if (map.IsJSGlobalObjectMap() && !is_js_array_element(is_element)) {
         GlobalDictionary dict =
             JSGlobalObject::cast(holder).global_dictionary(isolate_);
         number_ = dict.FindEntry(isolate(), name_);
@@ -1159,7 +1107,7 @@ LookupIterator::State LookupIterator::LookupInRegularHolder(
     return NOT_FOUND;
   }
 
-  if (is_element) {
+  if (is_element && IsElement(holder)) {
     JSObject js_object = JSObject::cast(holder);
     ElementsAccessor* accessor = js_object.GetElementsAccessor(isolate_);
     FixedArrayBase backing_store = js_object.elements(isolate_);
@@ -1205,8 +1153,12 @@ Handle<InterceptorInfo> LookupIterator::GetInterceptorForFailedAccessCheck()
   AccessCheckInfo access_check_info =
       AccessCheckInfo::Get(isolate_, Handle<JSObject>::cast(holder_));
   if (!access_check_info.is_null()) {
-    Object interceptor = IsElement() ? access_check_info.indexed_interceptor()
-                                     : access_check_info.named_interceptor();
+    // There is currently no way to create objects with typed array elements
+    // and access checks.
+    DCHECK(!holder_->map().has_typed_array_elements());
+    Object interceptor = is_js_array_element(IsElement())
+                             ? access_check_info.indexed_interceptor()
+                             : access_check_info.named_interceptor();
     if (interceptor != Object()) {
       return handle(InterceptorInfo::cast(interceptor), isolate_);
     }

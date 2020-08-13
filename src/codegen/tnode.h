@@ -13,6 +13,8 @@ namespace internal {
 class HeapNumber;
 class BigInt;
 class Object;
+class Smi;
+class TaggedIndex;
 
 namespace compiler {
 
@@ -26,8 +28,7 @@ struct IntegralT : UntaggedT {};
 
 struct WordT : IntegralT {
   static const MachineRepresentation kMachineRepresentation =
-      (kSystemPointerSize == 4) ? MachineRepresentation::kWord32
-                                : MachineRepresentation::kWord64;
+      MachineType::PointerRepresentation();
 };
 
 struct RawPtrT : WordT {
@@ -76,6 +77,12 @@ struct IntPtrT : WordT {
 };
 struct UintPtrT : WordT {
   static constexpr MachineType kMachineType = MachineType::UintPtr();
+};
+
+struct ExternalPointerT : UntaggedT {
+  static const MachineRepresentation kMachineRepresentation =
+      MachineType::PointerRepresentation();
+  static constexpr MachineType kMachineType = MachineType::Pointer();
 };
 
 struct Float32T : UntaggedT {
@@ -131,11 +138,19 @@ template <>
 struct MachineTypeOf<Smi> {
   static constexpr MachineType value = MachineType::TaggedSigned();
 };
+template <>
+struct MachineTypeOf<TaggedIndex> {
+  static constexpr MachineType value = MachineType::Pointer();
+};
 template <class HeapObjectSubtype>
 struct MachineTypeOf<HeapObjectSubtype,
                      typename std::enable_if<std::is_base_of<
                          HeapObject, HeapObjectSubtype>::value>::type> {
   static constexpr MachineType value = MachineType::TaggedPointer();
+};
+template <>
+struct MachineTypeOf<ExternalReference> {
+  static constexpr MachineType value = MachineType::Pointer();
 };
 
 template <class HeapObjectSubtype>
@@ -146,6 +161,12 @@ constexpr MachineType MachineTypeOf<
 template <class Type, class Enable = void>
 struct MachineRepresentationOf {
   static const MachineRepresentation value = Type::kMachineRepresentation;
+};
+// If T defines kMachineType, then we take the machine representation from
+// there.
+template <class T>
+struct MachineRepresentationOf<T, base::void_t<decltype(T::kMachineType)>> {
+  static const MachineRepresentation value = T::kMachineType.representation();
 };
 template <class T>
 struct MachineRepresentationOf<
@@ -163,6 +184,16 @@ template <>
 struct MachineRepresentationOf<ExternalReference> {
   static const MachineRepresentation value = RawPtrT::kMachineRepresentation;
 };
+
+template <typename T>
+constexpr bool IsMachineRepresentationOf(MachineRepresentation r) {
+  return MachineRepresentationOf<T>::value == r;
+}
+
+template <class T>
+constexpr MachineRepresentation PhiMachineRepresentationOf =
+    std::is_base_of<Word32T, T>::value ? MachineRepresentation::kWord32
+                                       : MachineRepresentationOf<T>::value;
 
 template <class T>
 struct is_valid_type_tag {
@@ -231,7 +262,9 @@ class int31_t {
 
 template <class T, class U>
 struct is_subtype {
-  static const bool value = std::is_base_of<U, T>::value;
+  static const bool value =
+      std::is_base_of<U, T>::value || (std::is_same<U, MaybeObject>::value &&
+                                       std::is_convertible<T, Object>::value);
 };
 template <class T1, class T2, class U>
 struct is_subtype<UnionT<T1, T2>, U> {
@@ -301,19 +334,11 @@ struct types_have_common_values<UnionT<T1, T2>, UnionT<U1, U2>> {
                             types_have_common_values<T2, U2>::value;
 };
 
-template <class T>
-struct types_have_common_values<T, MaybeObject> {
-  static const bool value = types_have_common_values<T, Object>::value;
-};
-
-template <class T>
-struct types_have_common_values<MaybeObject, T> {
-  static const bool value = types_have_common_values<Object, T>::value;
-};
-
 // TNode<T> is an SSA value with the static type tag T, which is one of the
 // following:
-//   - a subclass of internal::Object represents a tagged type
+//   - MaybeObject represents the type of all tagged values, including weak
+//     pointers.
+//   - a subclass of internal::Object represents a non-weak tagged type.
 //   - a subclass of internal::UntaggedT represents an untagged type
 //   - ExternalReference
 //   - PairT<T1, T2> for an operation returning two values, with types T1
@@ -335,7 +360,7 @@ class TNode {
     return *this;
   }
 
-  bool is_null() { return node_ == nullptr; }
+  bool is_null() const { return node_ == nullptr; }
 
   operator compiler::Node*() const { return node_; }
 

@@ -20,15 +20,24 @@ bool IsMachineLoad(Node* const node) {
          opcode == IrOpcode::kUnalignedLoad;
 }
 
+bool IsTaggedMachineLoad(Node* const node) {
+  return IsMachineLoad(node) &&
+         CanBeTaggedPointer(LoadRepresentationOf(node->op()).representation());
+}
+
 bool IsHeapConstant(Node* const node) {
   return node->opcode() == IrOpcode::kHeapConstant;
 }
 
+bool IsTaggedPhi(Node* const node) {
+  if (node->opcode() == IrOpcode::kPhi) {
+    return CanBeTaggedPointer(PhiRepresentationOf(node->op()));
+  }
+  return false;
+}
+
 bool CanBeCompressed(Node* const node) {
-  return IsHeapConstant(node) ||
-         (IsMachineLoad(node) &&
-          CanBeTaggedPointer(
-              LoadRepresentationOf(node->op()).representation()));
+  return IsHeapConstant(node) || IsTaggedMachineLoad(node) || IsTaggedPhi(node);
 }
 
 }  // anonymous namespace
@@ -55,22 +64,37 @@ void DecompressionOptimizer::MarkNodes() {
 void DecompressionOptimizer::MarkNodeInputs(Node* node) {
   // Mark the value inputs.
   switch (node->opcode()) {
-    // TODO(v8:7703): To be removed when the TaggedEqual implementation stops
-    // using ChangeTaggedToCompressed.
-    case IrOpcode::kChangeTaggedToCompressed:
+    // UNOPS.
+    case IrOpcode::kBitcastTaggedToWord:
+    case IrOpcode::kBitcastTaggedToWordForTagAndSmiBits:
+      // Replicate the bitcast's state for its input.
+      DCHECK_EQ(node->op()->ValueInputCount(), 1);
+      MaybeMarkAndQueueForRevisit(node->InputAt(0),
+                                  states_.Get(node));  // value
+      break;
+    case IrOpcode::kTruncateInt64ToInt32:
       DCHECK_EQ(node->op()->ValueInputCount(), 1);
       MaybeMarkAndQueueForRevisit(node->InputAt(0),
                                   State::kOnly32BitsObserved);  // value
       break;
+    // BINOPS.
+    case IrOpcode::kInt32LessThan:
+    case IrOpcode::kInt32LessThanOrEqual:
+    case IrOpcode::kUint32LessThan:
+    case IrOpcode::kUint32LessThanOrEqual:
+    case IrOpcode::kWord32And:
     case IrOpcode::kWord32Equal:
+    case IrOpcode::kWord32Shl:
       DCHECK_EQ(node->op()->ValueInputCount(), 2);
       MaybeMarkAndQueueForRevisit(node->InputAt(0),
                                   State::kOnly32BitsObserved);  // value_0
       MaybeMarkAndQueueForRevisit(node->InputAt(1),
                                   State::kOnly32BitsObserved);  // value_1
       break;
-    case IrOpcode::kStore:           // Fall through.
-    case IrOpcode::kProtectedStore:  // Fall through.
+    // SPECIAL CASES.
+    // SPECIAL CASES - Store.
+    case IrOpcode::kStore:
+    case IrOpcode::kProtectedStore:
     case IrOpcode::kUnalignedStore:
       DCHECK_EQ(node->op()->ValueInputCount(), 3);
       MaybeMarkAndQueueForRevisit(node->InputAt(0),
@@ -86,6 +110,27 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
               ? State::kOnly32BitsObserved
               : State::kEverythingObserved);  // value
       break;
+    // SPECIAL CASES - Variable inputs.
+    // The deopt code knows how to handle Compressed inputs, both
+    // MachineRepresentation kCompressed values and CompressedHeapConstants.
+    case IrOpcode::kFrameState:  // Fall through.
+    // TODO(v8:7703): kStateValues doesn't appear in any test linked to Loads or
+    // HeapConstants. Do we care about this case?
+    case IrOpcode::kStateValues:  // Fall through.
+    case IrOpcode::kTypedStateValues:
+      for (int i = 0; i < node->op()->ValueInputCount(); ++i) {
+        MaybeMarkAndQueueForRevisit(node->InputAt(i),
+                                    State::kOnly32BitsObserved);
+      }
+      break;
+    case IrOpcode::kPhi: {
+      // Replicate the phi's state for its inputs.
+      State curr_state = states_.Get(node);
+      for (int i = 0; i < node->op()->ValueInputCount(); ++i) {
+        MaybeMarkAndQueueForRevisit(node->InputAt(i), curr_state);
+      }
+      break;
+    }
     default:
       // To be conservative, we assume that all value inputs need to be 64 bits
       // unless noted otherwise.
@@ -125,6 +170,21 @@ void DecompressionOptimizer::ChangeHeapConstant(Node* const node) {
   DCHECK(IsHeapConstant(node));
   NodeProperties::ChangeOp(
       node, common()->CompressedHeapConstant(HeapConstantOf(node->op())));
+}
+
+void DecompressionOptimizer::ChangePhi(Node* const node) {
+  DCHECK(IsTaggedPhi(node));
+
+  MachineRepresentation mach_rep = PhiRepresentationOf(node->op());
+  if (mach_rep == MachineRepresentation::kTagged) {
+    mach_rep = MachineRepresentation::kCompressed;
+  } else {
+    DCHECK_EQ(mach_rep, MachineRepresentation::kTaggedPointer);
+    mach_rep = MachineRepresentation::kCompressedPointer;
+  }
+
+  NodeProperties::ChangeOp(
+      node, common()->Phi(mach_rep, node->op()->ValueInputCount()));
 }
 
 void DecompressionOptimizer::ChangeLoad(Node* const node) {
@@ -170,10 +230,16 @@ void DecompressionOptimizer::ChangeNodes() {
     // when we update them to State::IsEverythingObserved.
     if (IsEverythingObserved(node)) continue;
 
-    if (IsHeapConstant(node)) {
-      ChangeHeapConstant(node);
-    } else {
-      ChangeLoad(node);
+    switch (node->opcode()) {
+      case IrOpcode::kHeapConstant:
+        ChangeHeapConstant(node);
+        break;
+      case IrOpcode::kPhi:
+        ChangePhi(node);
+        break;
+      default:
+        ChangeLoad(node);
+        break;
     }
   }
 }

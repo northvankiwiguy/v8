@@ -65,6 +65,8 @@ namespace internal {
   T(ConstructorClassField, "Classes may not have a field named 'constructor'") \
   T(ConstructorNonCallable,                                                    \
     "Class constructor % cannot be invoked without 'new'")                     \
+  T(AnonymousConstructorNonCallable,                                           \
+    "Class constructors cannot be invoked without 'new'")                      \
   T(ConstructorNotFunction, "Constructor % requires 'new'")                    \
   T(ConstructorNotReceiver, "The .constructor property is not an object")      \
   T(CurrencyCode, "Currency code is required with currency style.")            \
@@ -221,8 +223,6 @@ namespace internal {
   T(ProxyGetPrototypeOfNonExtensible,                                          \
     "'getPrototypeOf' on proxy: proxy target is non-extensible but the "       \
     "trap did not return its actual prototype")                                \
-  T(ProxyHandlerOrTargetRevoked,                                               \
-    "Cannot create proxy with a revoked proxy as target or handler")           \
   T(ProxyHasNonConfigurable,                                                   \
     "'has' on proxy: trap returned falsish for property '%' which exists in "  \
     "the proxy target as non-configurable")                                    \
@@ -269,7 +269,7 @@ namespace internal {
   T(RegExpNonObject, "% getter called on non-object %")                        \
   T(RegExpNonRegExp, "% getter called on non-RegExp object")                   \
   T(RegExpGlobalInvokedOnNonGlobal,                                            \
-    "%s called with a non-global RegExp argument")                             \
+    "% called with a non-global RegExp argument")                              \
   T(RelativeDateTimeFormatterBadParameters,                                    \
     "Incorrect RelativeDateTimeFormatter provided")                            \
   T(ResolverNotAFunction, "Promise resolver % is not a function")              \
@@ -320,7 +320,7 @@ namespace internal {
     "a location, got %")                                                       \
   T(InvalidArrayBufferLength, "Invalid array buffer length")                   \
   T(ArrayBufferAllocationFailed, "Array buffer allocation failed")             \
-  T(Invalid, "Invalid %s : %")                                                 \
+  T(Invalid, "Invalid % : %")                                                  \
   T(InvalidArrayLength, "Invalid array length")                                \
   T(InvalidAtomicAccessIndex, "Invalid atomic access index")                   \
   T(InvalidCodePoint, "Invalid code point %")                                  \
@@ -413,6 +413,7 @@ namespace internal {
     "Invalid left-hand side expression in prefix operation")                   \
   T(InvalidRegExpFlags, "Invalid flags supplied to RegExp constructor '%'")    \
   T(InvalidOrUnexpectedToken, "Invalid or unexpected token")                   \
+  T(InvalidPrivateBrand, "Object must be an instance of class %")              \
   T(InvalidPrivateFieldResolution,                                             \
     "Private field '%' must be declared in an enclosing class")                \
   T(InvalidPrivateMemberRead,                                                  \
@@ -424,6 +425,8 @@ namespace internal {
   T(InvalidPrivateMethodWrite, "Private method '%' is not writable")           \
   T(InvalidPrivateGetterAccess, "'%' was defined without a getter")            \
   T(InvalidPrivateSetterAccess, "'%' was defined without a setter")            \
+  T(InvalidUnusedPrivateStaticMethodAccessedByDebugger,                        \
+    "Unused static private method '%' cannot be accessed at debug time")       \
   T(JsonParseUnexpectedEOS, "Unexpected end of JSON input")                    \
   T(JsonParseUnexpectedToken, "Unexpected token % in JSON at position %")      \
   T(JsonParseUnexpectedTokenNumber, "Unexpected number in JSON at position %") \
@@ -479,9 +482,11 @@ namespace internal {
     "Decimals with leading zeros are not allowed in strict mode.")             \
   T(StrictOctalEscape,                                                         \
     "Octal escape sequences are not allowed in strict mode.")                  \
+  T(Strict8Or9Escape, "\\8 and \\9 are not allowed in strict mode.")           \
   T(StrictWith, "Strict mode code may not include a with statement")           \
   T(TemplateOctalLiteral,                                                      \
     "Octal escape sequences are not allowed in template strings.")             \
+  T(Template8Or9Escape, "\\8 and \\9 are not allowed in template strings.")    \
   T(ThisFormalParameter, "'this' is not a valid formal parameter name")        \
   T(AwaitBindingIdentifier,                                                    \
     "'await' is not a valid identifier name in an async function")             \
@@ -495,7 +500,8 @@ namespace internal {
   T(TooManySpreads,                                                            \
     "Literal containing too many nested spreads (up to 65534 allowed)")        \
   T(TooManyVariables, "Too many variables declared (only 4194303 allowed)")    \
-  T(TooManyElementsInPromiseAll, "Too many elements passed to Promise.all")    \
+  T(TooManyElementsInPromiseCombinator,                                        \
+    "Too many elements passed to Promise.%")                                   \
   T(TypedArrayTooShort,                                                        \
     "Derived TypedArray constructor created an array which was too small")     \
   T(UnexpectedEOS, "Unexpected end of input")                                  \
@@ -547,6 +553,11 @@ namespace internal {
   T(WasmTrapDataSegmentDropped, "data segment has been dropped")               \
   T(WasmTrapElemSegmentDropped, "element segment has been dropped")            \
   T(WasmTrapTableOutOfBounds, "table access out of bounds")                    \
+  T(WasmTrapBrOnExnNull, "br_on_exn on null value")                            \
+  T(WasmTrapRethrowNull, "rethrowing null value")                              \
+  T(WasmTrapNullDereference, "dereferencing a null pointer")                   \
+  T(WasmTrapIllegalCast, "illegal cast")                                       \
+  T(WasmTrapArrayOutOfBounds, "array element access out of bounds")            \
   T(WasmExceptionError, "wasm exception")                                      \
   /* Asm.js validation related */                                              \
   T(AsmJsInvalid, "Invalid asm.js: %")                                         \
@@ -576,17 +587,19 @@ namespace internal {
   T(WeakRefsUnregisterTokenMustBeObject,                                       \
     "unregisterToken ('%') must be an object")                                 \
   T(WeakRefsCleanupMustBeCallable,                                             \
-    "FinalizationGroup: cleanup must be callable")                             \
+    "FinalizationRegistry: cleanup must be callable")                          \
   T(WeakRefsRegisterTargetMustBeObject,                                        \
-    "FinalizationGroup.prototype.register: target must be an object")          \
+    "FinalizationRegistry.prototype.register: target must be an object")       \
   T(WeakRefsRegisterTargetAndHoldingsMustNotBeSame,                            \
-    "FinalizationGroup.prototype.register: target and holdings must not be "   \
-    "same")                                                                    \
+    "FinalizationRegistry.prototype.register: target and holdings must not "   \
+    "be same")                                                                 \
   T(WeakRefsWeakRefConstructorTargetMustBeObject,                              \
     "WeakRef: target must be an object")                                       \
   T(OptionalChainingNoNew, "Invalid optional chain from new expression")       \
   T(OptionalChainingNoSuper, "Invalid optional chain from super property")     \
-  T(OptionalChainingNoTemplate, "Invalid tagged template on optional chain")
+  T(OptionalChainingNoTemplate, "Invalid tagged template on optional chain")   \
+  /* AggregateError */                                                         \
+  T(AllPromisesRejected, "All promises were rejected")
 
 enum class MessageTemplate {
 #define TEMPLATE(NAME, STRING) k##NAME,

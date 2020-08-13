@@ -64,7 +64,7 @@ enum class EscapeKind : uint8_t {
   kUnicode
 };
 
-using EscapeKindField = BitField8<EscapeKind, 0, 3>;
+using EscapeKindField = base::BitField8<EscapeKind, 0, 3>;
 using MayTerminateStringField = EscapeKindField::Next<bool, 1>;
 using NumberPartField = MayTerminateStringField::Next<bool, 1>;
 
@@ -267,7 +267,7 @@ void JsonParser<Char>::ReportUnexpectedToken(JsonToken token) {
 
   Handle<Script> script(factory->NewScript(original_source_));
   if (isolate()->NeedsSourcePositionsForProfiling()) {
-    Script::InitLineEnds(script);
+    Script::InitLineEnds(isolate(), script);
   }
   // We should sent compile error event because we compile JSON object in
   // separated source file.
@@ -335,7 +335,7 @@ uc32 JsonParser<Char>::ScanUnicodeCharacter() {
   uc32 value = 0;
   for (int i = 0; i < 4; i++) {
     int digit = HexValue(NextCharacter());
-    if (V8_UNLIKELY(digit < 0)) return -1;
+    if (V8_UNLIKELY(digit < 0)) return kInvalidUnicodeCharacter;
     value = value * 16 + digit;
   }
   return value;
@@ -362,7 +362,7 @@ JsonString JsonParser<Char>::ScanJsonPropertyKey(JsonContinuation* cont) {
         uint32_t index = first - '0';
         while (true) {
           cursor_ = std::find_if(cursor_ + 1, end_, [&index](Char c) {
-            return !TryAddIndexChar(&index, c);
+            return !TryAddArrayIndexChar(&index, c);
           });
 
           if (CurrentCharacter() == '"') {
@@ -374,7 +374,7 @@ JsonString JsonParser<Char>::ScanJsonPropertyKey(JsonContinuation* cont) {
           }
 
           if (CurrentCharacter() == '\\' && NextCharacter() == 'u') {
-            if (TryAddIndexChar(&index, ScanUnicodeCharacter())) continue;
+            if (TryAddArrayIndexChar(&index, ScanUnicodeCharacter())) continue;
           }
 
           break;
@@ -838,8 +838,11 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
             Map maybe_feedback = JSObject::cast(*element_stack.back()).map();
             // Don't consume feedback from objects with a map that's detached
             // from the transition tree.
-            if (!maybe_feedback.GetBackPointer().IsUndefined(isolate_)) {
+            if (!maybe_feedback.IsDetached(isolate_)) {
               feedback = handle(maybe_feedback, isolate_);
+              if (feedback->is_deprecated()) {
+                feedback = Map::Update(isolate_, feedback);
+              }
             }
           }
           value = BuildJsonObject(cont, property_stack, feedback);
@@ -906,7 +909,8 @@ Handle<Object> JsonParser<Char>::ParseJsonNumber() {
       // Prefix zero is only allowed if it's the only digit before
       // a decimal point or exponent.
       c = NextCharacter();
-      if (IsInRange(c, 0, static_cast<int32_t>(unibrow::Latin1::kMaxChar)) &&
+      if (base::IsInRange(c, 0,
+                          static_cast<int32_t>(unibrow::Latin1::kMaxChar)) &&
           IsNumberPart(character_json_scan_flags[c])) {
         if (V8_UNLIKELY(IsDecimalDigit(c))) {
           AllowHeapAllocation allow_before_exception;
@@ -929,7 +933,8 @@ Handle<Object> JsonParser<Char>::ParseJsonNumber() {
       STATIC_ASSERT(Smi::IsValid(999999999));
       const int kMaxSmiLength = 9;
       if ((cursor_ - smi_start) <= kMaxSmiLength &&
-          (!IsInRange(c, 0, static_cast<int32_t>(unibrow::Latin1::kMaxChar)) ||
+          (!base::IsInRange(c, 0,
+                            static_cast<int32_t>(unibrow::Latin1::kMaxChar)) ||
            !IsNumberPart(character_json_scan_flags[c]))) {
         // Smi.
         int32_t i = 0;
@@ -1149,7 +1154,7 @@ JsonString JsonParser<Char>::ScanJsonString(bool needs_internalization) {
     if (*cursor_ == '\\') {
       has_escape = true;
       uc32 c = NextCharacter();
-      if (V8_UNLIKELY(!IsInRange(
+      if (V8_UNLIKELY(!base::IsInRange(
               c, 0, static_cast<int32_t>(unibrow::Latin1::kMaxChar)))) {
         AllowHeapAllocation allow_before_exception;
         ReportUnexpectedCharacter(c);
@@ -1168,7 +1173,7 @@ JsonString JsonParser<Char>::ScanJsonString(bool needs_internalization) {
 
         case EscapeKind::kUnicode: {
           uc32 value = ScanUnicodeCharacter();
-          if (value == -1) {
+          if (value == kInvalidUnicodeCharacter) {
             AllowHeapAllocation allow_before_exception;
             ReportUnexpectedCharacter(CurrentCharacter());
             return JsonString();
