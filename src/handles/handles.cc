@@ -35,7 +35,6 @@ bool HandleBase::IsDereferenceAllowed() const {
   if (object.IsSmi()) return true;
   HeapObject heap_object = HeapObject::cast(object);
   if (IsReadOnlyHeapObject(heap_object)) return true;
-  if (Heap::InOffThreadSpace(heap_object)) return true;
   Isolate* isolate = GetIsolateFromWritableObject(heap_object);
   RootIndex root_index;
   if (isolate->roots_table().IsRootHandleLocation(location_, &root_index) &&
@@ -44,7 +43,7 @@ bool HandleBase::IsDereferenceAllowed() const {
   }
 
   LocalHeap* local_heap = LocalHeap::Current();
-  if (V8_UNLIKELY(local_heap)) {
+  if (FLAG_local_heaps && local_heap) {
     // Local heap can't access handles when parked
     if (!local_heap->IsHandleDereferenceAllowed()) return false;
 
@@ -176,12 +175,12 @@ Address* CanonicalHandleScope::Lookup(Address object) {
       return isolate_->root_handle(root_index).location();
     }
   }
-  Address** entry = identity_map_->Get(Object(object));
-  if (*entry == nullptr) {
+  auto find_result = identity_map_->FindOrInsert(Object(object));
+  if (!find_result.already_exists) {
     // Allocate new handle location.
-    *entry = HandleScope::CreateHandle(isolate_, object);
+    *find_result.entry = HandleScope::CreateHandle(isolate_, object);
   }
-  return *entry;
+  return *find_result.entry;
 }
 
 std::unique_ptr<CanonicalHandlesMap>

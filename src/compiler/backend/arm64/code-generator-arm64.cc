@@ -418,6 +418,18 @@ void EmitMaybePoisonedFPLoad(CodeGenerator* codegen, InstructionCode opcode,
   }
 }
 
+// Handles unary ops that work for float (scalar), double (scalar), or NEON.
+template <typename Fn>
+void EmitFpOrNeonUnop(TurboAssembler* tasm, Fn fn, Instruction* instr,
+                      Arm64OperandConverter i, VectorFormat scalar,
+                      VectorFormat vector) {
+  VectorFormat f = instr->InputAt(0)->IsSimd128Register() ? vector : scalar;
+
+  VRegister output = VRegister::Create(i.OutputDoubleRegister().code(), f);
+  VRegister input = VRegister::Create(i.InputDoubleRegister(0).code(), f);
+  (tasm->*fn)(output, input);
+}
+
 }  // namespace
 
 #define ASSEMBLE_SHIFT(asm_instr, width)                                    \
@@ -1030,31 +1042,40 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       ASSEMBLE_IEEE754_UNOP(tanh);
       break;
     case kArm64Float32RoundDown:
-      __ Frintm(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintm, instr, i, kFormatS,
+                       kFormat4S);
       break;
     case kArm64Float64RoundDown:
-      __ Frintm(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintm, instr, i, kFormatD,
+                       kFormat2D);
       break;
     case kArm64Float32RoundUp:
-      __ Frintp(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintp, instr, i, kFormatS,
+                       kFormat4S);
       break;
     case kArm64Float64RoundUp:
-      __ Frintp(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintp, instr, i, kFormatD,
+                       kFormat2D);
       break;
     case kArm64Float64RoundTiesAway:
-      __ Frinta(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frinta, instr, i, kFormatD,
+                       kFormat2D);
       break;
     case kArm64Float32RoundTruncate:
-      __ Frintz(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintz, instr, i, kFormatS,
+                       kFormat4S);
       break;
     case kArm64Float64RoundTruncate:
-      __ Frintz(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintz, instr, i, kFormatD,
+                       kFormat2D);
       break;
     case kArm64Float32RoundTiesEven:
-      __ Frintn(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintn, instr, i, kFormatS,
+                       kFormat4S);
       break;
     case kArm64Float64RoundTiesEven:
-      __ Frintn(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      EmitFpOrNeonUnop(tasm(), &TurboAssembler::Frintn, instr, i, kFormatD,
+                       kFormat2D);
       break;
     case kArm64Add:
       if (FlagsModeField::decode(opcode) != kFlags_none) {
@@ -1358,9 +1379,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         LocationOperand* op = LocationOperand::cast(instr->OutputAt(0));
         if (op->representation() == MachineRepresentation::kFloat64) {
           __ Ldr(i.OutputDoubleRegister(), MemOperand(fp, offset));
-        } else {
-          DCHECK_EQ(MachineRepresentation::kFloat32, op->representation());
+        } else if (op->representation() == MachineRepresentation::kFloat32) {
           __ Ldr(i.OutputFloatRegister(), MemOperand(fp, offset));
+        } else {
+          DCHECK_EQ(MachineRepresentation::kSimd128, op->representation());
+          __ Ldr(i.OutputSimd128Register(), MemOperand(fp, offset));
         }
       } else {
         __ Ldr(i.OutputRegister(), MemOperand(fp, offset));
@@ -1938,22 +1961,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Bsl(dst.V16B(), rhs.V16B(), lhs.V16B());
       break;
     }
-    case kArm64F64x2RoundUp:
-      __ Frintp(i.OutputSimd128Register().V2D(),
-                i.InputSimd128Register(0).V2D());
-      break;
-    case kArm64F64x2RoundDown:
-      __ Frintm(i.OutputSimd128Register().V2D(),
-                i.InputSimd128Register(0).V2D());
-      break;
-    case kArm64F64x2RoundTruncate:
-      __ Frintz(i.OutputSimd128Register().V2D(),
-                i.InputSimd128Register(0).V2D());
-      break;
-    case kArm64F64x2RoundTiesEven:
-      __ Frintn(i.OutputSimd128Register().V2D(),
-                i.InputSimd128Register(0).V2D());
-      break;
     case kArm64F32x4Splat: {
       __ Dup(i.OutputSimd128Register().V4S(), i.InputSimd128Register(0).S(), 0);
       break;
@@ -2027,22 +2034,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Bsl(dst.V16B(), rhs.V16B(), lhs.V16B());
       break;
     }
-    case kArm64F32x4RoundUp:
-      __ Frintp(i.OutputSimd128Register().V4S(),
-                i.InputSimd128Register(0).V4S());
-      break;
-    case kArm64F32x4RoundDown:
-      __ Frintm(i.OutputSimd128Register().V4S(),
-                i.InputSimd128Register(0).V4S());
-      break;
-    case kArm64F32x4RoundTruncate:
-      __ Frintz(i.OutputSimd128Register().V4S(),
-                i.InputSimd128Register(0).V4S());
-      break;
-    case kArm64F32x4RoundTiesEven:
-      __ Frintn(i.OutputSimd128Register().V4S(),
-                i.InputSimd128Register(0).V4S());
-      break;
     case kArm64I64x2Splat: {
       __ Dup(i.OutputSimd128Register().V2D(), i.InputRegister64(0));
       break;
@@ -2549,18 +2540,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(1).V16B(), i.InputInt4(2));
       break;
     }
-    case kArm64S8x16Swizzle: {
+    case kArm64I8x16Swizzle: {
       __ Tbl(i.OutputSimd128Register().V16B(), i.InputSimd128Register(0).V16B(),
              i.InputSimd128Register(1).V16B());
       break;
     }
-    case kArm64S8x16Shuffle: {
+    case kArm64I8x16Shuffle: {
       Simd128Register dst = i.OutputSimd128Register().V16B(),
                       src0 = i.InputSimd128Register(0).V16B(),
                       src1 = i.InputSimd128Register(1).V16B();
       // Unary shuffle table is in src0, binary shuffle table is in src0, src1,
       // which must be consecutive.
-      int64_t mask = 0;
+      uint32_t mask = 0;
       if (src0 == src1) {
         mask = 0x0F0F0F0F;
       } else {
@@ -2599,50 +2590,47 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Add(i.OutputRegister32(), i.OutputRegister32(), 1);
       break;
     }
-    case kArm64S8x16LoadSplat: {
-      __ ld1r(i.OutputSimd128Register().V16B(), i.MemoryOperand(0));
+    case kArm64LoadSplat: {
+      VectorFormat f = VectorFormatFillQ(MiscField::decode(opcode));
+      __ ld1r(i.OutputSimd128Register().Format(f), i.MemoryOperand(0));
       break;
     }
-    case kArm64S16x8LoadSplat: {
-      __ ld1r(i.OutputSimd128Register().V8H(), i.MemoryOperand(0));
-      break;
-    }
-    case kArm64S32x4LoadSplat: {
-      __ ld1r(i.OutputSimd128Register().V4S(), i.MemoryOperand(0));
-      break;
-    }
-    case kArm64S64x2LoadSplat: {
-      __ ld1r(i.OutputSimd128Register().V2D(), i.MemoryOperand(0));
-      break;
-    }
-    case kArm64I16x8Load8x8S: {
+    case kArm64S128Load8x8S: {
       __ Ldr(i.OutputSimd128Register().V8B(), i.MemoryOperand(0));
       __ Sxtl(i.OutputSimd128Register().V8H(), i.OutputSimd128Register().V8B());
       break;
     }
-    case kArm64I16x8Load8x8U: {
+    case kArm64S128Load8x8U: {
       __ Ldr(i.OutputSimd128Register().V8B(), i.MemoryOperand(0));
       __ Uxtl(i.OutputSimd128Register().V8H(), i.OutputSimd128Register().V8B());
       break;
     }
-    case kArm64I32x4Load16x4S: {
+    case kArm64S128Load16x4S: {
       __ Ldr(i.OutputSimd128Register().V4H(), i.MemoryOperand(0));
       __ Sxtl(i.OutputSimd128Register().V4S(), i.OutputSimd128Register().V4H());
       break;
     }
-    case kArm64I32x4Load16x4U: {
+    case kArm64S128Load16x4U: {
       __ Ldr(i.OutputSimd128Register().V4H(), i.MemoryOperand(0));
       __ Uxtl(i.OutputSimd128Register().V4S(), i.OutputSimd128Register().V4H());
       break;
     }
-    case kArm64I64x2Load32x2S: {
+    case kArm64S128Load32x2S: {
       __ Ldr(i.OutputSimd128Register().V2S(), i.MemoryOperand(0));
       __ Sxtl(i.OutputSimd128Register().V2D(), i.OutputSimd128Register().V2S());
       break;
     }
-    case kArm64I64x2Load32x2U: {
+    case kArm64S128Load32x2U: {
       __ Ldr(i.OutputSimd128Register().V2S(), i.MemoryOperand(0));
       __ Uxtl(i.OutputSimd128Register().V2D(), i.OutputSimd128Register().V2S());
+      break;
+    }
+    case kArm64S128LoadMem32Zero: {
+      __ Ldr(i.OutputSimd128Register().S(), i.MemoryOperand(0));
+      break;
+    }
+    case kArm64S128LoadMem64Zero: {
+      __ Ldr(i.OutputSimd128Register().D(), i.MemoryOperand(0));
       break;
     }
 #define SIMD_REDUCE_OP_CASE(Op, Instr, format, FORMAT)     \
@@ -2655,13 +2643,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     __ Cset(i.OutputRegister32(), ne);                     \
     break;                                                 \
   }
-      // for AnyTrue, the format does not matter, umaxv does not support 2D
-      SIMD_REDUCE_OP_CASE(kArm64V64x2AnyTrue, Umaxv, kFormatS, 4S);
-      SIMD_REDUCE_OP_CASE(kArm64V32x4AnyTrue, Umaxv, kFormatS, 4S);
+      // For AnyTrue, the format does not matter.
+      SIMD_REDUCE_OP_CASE(kArm64V128AnyTrue, Umaxv, kFormatS, 4S);
       SIMD_REDUCE_OP_CASE(kArm64V32x4AllTrue, Uminv, kFormatS, 4S);
-      SIMD_REDUCE_OP_CASE(kArm64V16x8AnyTrue, Umaxv, kFormatH, 8H);
       SIMD_REDUCE_OP_CASE(kArm64V16x8AllTrue, Uminv, kFormatH, 8H);
-      SIMD_REDUCE_OP_CASE(kArm64V8x16AnyTrue, Umaxv, kFormatB, 16B);
       SIMD_REDUCE_OP_CASE(kArm64V8x16AllTrue, Uminv, kFormatB, 16B);
   }
   return kSuccess;
@@ -2909,7 +2894,12 @@ void CodeGenerator::AssembleConstructFrame() {
   if (frame_access_state()->has_frame()) {
     // Link the frame
     if (call_descriptor->IsJSFunctionCall()) {
+      STATIC_ASSERT(InterpreterFrameConstants::kFixedFrameSize % 16 == 8);
+      DCHECK_EQ(required_slots % 2, 1);
       __ Prologue();
+      // Update required_slots count since we have just claimed one extra slot.
+      STATIC_ASSERT(TurboAssembler::kExtraSlotClaimedByPrologue == 1);
+      required_slots -= TurboAssembler::kExtraSlotClaimedByPrologue;
     } else {
       __ Push<TurboAssembler::kSignLR>(lr, fp);
       __ Mov(fp, sp);
@@ -2927,7 +2917,13 @@ void CodeGenerator::AssembleConstructFrame() {
       // to allocate the remaining stack slots.
       if (FLAG_code_comments) __ RecordComment("-- OSR entrypoint --");
       osr_pc_offset_ = __ pc_offset();
-      required_slots -= osr_helper()->UnoptimizedFrameSlots();
+      size_t unoptimized_frame_slots = osr_helper()->UnoptimizedFrameSlots();
+      DCHECK(call_descriptor->IsJSFunctionCall());
+      DCHECK_EQ(unoptimized_frame_slots % 2, 1);
+      // One unoptimized frame slot has already been claimed when the actual
+      // arguments count was pushed.
+      required_slots -=
+          unoptimized_frame_slots - TurboAssembler::kExtraSlotClaimedByPrologue;
       ResetSpeculationPoison();
     }
 
@@ -2982,13 +2978,7 @@ void CodeGenerator::AssembleConstructFrame() {
     // recording their argument count.
     switch (call_descriptor->kind()) {
       case CallDescriptor::kCallJSFunction:
-        if (call_descriptor->PushArgumentCount()) {
-          __ Claim(required_slots + 1);  // Claim extra slot for argc.
-          __ Str(kJavaScriptCallArgCountRegister,
-                 MemOperand(fp, OptimizedBuiltinFrameConstants::kArgCOffset));
-        } else {
-          __ Claim(required_slots);
-        }
+        __ Claim(required_slots);
         break;
       case CallDescriptor::kCallCodeObject: {
         UseScratchRegisterScope temps(tasm());

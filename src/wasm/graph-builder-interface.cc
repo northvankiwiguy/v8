@@ -74,11 +74,11 @@ constexpr uint32_t kNullCatch = static_cast<uint32_t>(-1);
 
 class WasmGraphBuildingInterface {
  public:
-  static constexpr Decoder::ValidateFlag validate = Decoder::kValidate;
+  static constexpr Decoder::ValidateFlag validate = Decoder::kFullValidation;
   using FullDecoder = WasmFullDecoder<validate, WasmGraphBuildingInterface>;
   using CheckForNull = compiler::WasmGraphBuilder::CheckForNull;
 
-  struct Value : public ValueBase {
+  struct Value : public ValueBase<validate> {
     TFNode* node = nullptr;
 
     template <typename... Args>
@@ -97,7 +97,7 @@ class WasmGraphBuildingInterface {
     explicit TryInfo(SsaEnv* c) : catch_env(c) {}
   };
 
-  struct Control : public ControlBase<Value> {
+  struct Control : public ControlBase<Value, validate> {
     SsaEnv* end_env = nullptr;    // end environment for the construct.
     SsaEnv* false_env = nullptr;  // false environment (only for if).
     TryInfo* try_info = nullptr;  // information about try statements.
@@ -268,7 +268,7 @@ class WasmGraphBuildingInterface {
     result->node = builder_->Simd128Constant(imm.value);
   }
 
-  void RefNull(FullDecoder* decoder, Value* result) {
+  void RefNull(FullDecoder* decoder, ValueType type, Value* result) {
     result->node = builder_->RefNull();
   }
 
@@ -482,6 +482,26 @@ class WasmGraphBuildingInterface {
     DoReturnCall(decoder, kIndirect, imm.table_index,
                  CheckForNull::kWithoutNullCheck, index.node, imm.sig,
                  imm.sig_index, args);
+  }
+
+  void CallRef(FullDecoder* decoder, const Value& func_ref,
+               const FunctionSig* sig, uint32_t sig_index, const Value args[],
+               Value returns[]) {
+    CheckForNull null_check = func_ref.type.is_nullable()
+                                  ? CheckForNull::kWithNullCheck
+                                  : CheckForNull::kWithoutNullCheck;
+    DoCall(decoder, kRef, 0, null_check, func_ref.node, sig, sig_index, args,
+           returns);
+  }
+
+  void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
+                     const FunctionSig* sig, uint32_t sig_index,
+                     const Value args[]) {
+    CheckForNull null_check = func_ref.type.is_nullable()
+                                  ? CheckForNull::kWithNullCheck
+                                  : CheckForNull::kWithoutNullCheck;
+    DoReturnCall(decoder, kRef, 0, null_check, func_ref.node, sig, sig_index,
+                 args);
   }
 
   void BrOnNull(FullDecoder* decoder, const Value& ref_object, uint32_t depth) {
@@ -921,6 +941,7 @@ class WasmGraphBuildingInterface {
   }
 
   TFNode* DefaultValue(ValueType type) {
+    DCHECK(type.is_defaultable());
     switch (type.kind()) {
       case ValueType::kI8:
       case ValueType::kI16:
@@ -1134,7 +1155,9 @@ class WasmGraphBuildingInterface {
               VectorOf(return_nodes), decoder->position());
         break;
       case kRef:
-        UNREACHABLE();
+        BUILD(CallRef, sig_index, VectorOf(arg_nodes), VectorOf(return_nodes),
+              null_check, decoder->position());
+        break;
     }
     for (size_t i = 0; i < return_count; ++i) {
       returns[i].node = return_nodes[i];
@@ -1163,7 +1186,8 @@ class WasmGraphBuildingInterface {
         BUILD(ReturnCall, sig_index, VectorOf(arg_nodes), decoder->position());
         break;
       case kRef:
-        UNREACHABLE();
+        BUILD(ReturnCallRef, sig_index, VectorOf(arg_nodes), null_check,
+              decoder->position());
     }
   }
 };
@@ -1176,7 +1200,7 @@ DecodeResult BuildTFGraph(AccountingAllocator* allocator,
                           WasmFeatures* detected, const FunctionBody& body,
                           compiler::NodeOriginTable* node_origins) {
   Zone zone(allocator, ZONE_NAME);
-  WasmFullDecoder<Decoder::kValidate, WasmGraphBuildingInterface> decoder(
+  WasmFullDecoder<Decoder::kFullValidation, WasmGraphBuildingInterface> decoder(
       &zone, module, enabled, detected, body, builder);
   if (node_origins) {
     builder->AddBytecodePositionDecorator(node_origins, &decoder);

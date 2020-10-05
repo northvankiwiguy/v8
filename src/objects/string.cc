@@ -4,6 +4,7 @@
 
 #include "src/objects/string.h"
 
+#include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/heap-inl.h"
@@ -42,6 +43,7 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
   }
 
   DCHECK(AllowHeapAllocation::IsAllowed());
+  DCHECK(AllowGarbageCollection::IsAllowed());
   int length = cons->length();
   allocation =
       ObjectInYoungGeneration(*cons) ? allocation : AllocationType::kOld;
@@ -196,6 +198,7 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   this->synchronized_set_map(new_map);
 
   ExternalTwoByteString self = ExternalTwoByteString::cast(*this);
+  self.AllocateExternalPointerEntries(isolate);
   self.SetResource(isolate, resource);
   isolate->heap()->RegisterExternalString(*this);
   if (is_internalized) self.Hash();  // Force regeneration of the hash value.
@@ -266,6 +269,7 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   this->synchronized_set_map(new_map);
 
   ExternalOneByteString self = ExternalOneByteString::cast(*this);
+  self.AllocateExternalPointerEntries(isolate);
   self.SetResource(isolate, resource);
   isolate->heap()->RegisterExternalString(*this);
   if (is_internalized) self.Hash();  // Force regeneration of the hash value.
@@ -308,6 +312,8 @@ const char* String::PrefixForDebugPrint() const {
       return "uc\"";
     } else if (shape.IsThin()) {
       return "u>\"";
+    } else if (shape.IsExternal()) {
+      return "ue\"";
     } else {
       return "u\"";
     }
@@ -319,6 +325,8 @@ const char* String::PrefixForDebugPrint() const {
       return "c\"";
     } else if (shape.IsThin()) {
       return ">\"";
+    } else if (shape.IsExternal()) {
+      return "e\"";
     } else {
       return "\"";
     }
@@ -755,7 +763,7 @@ Handle<FixedArray> String::CalculateLineEnds(LocalIsolate* isolate,
 template Handle<FixedArray> String::CalculateLineEnds(Isolate* isolate,
                                                       Handle<String> src,
                                                       bool include_ending_line);
-template Handle<FixedArray> String::CalculateLineEnds(OffThreadIsolate* isolate,
+template Handle<FixedArray> String::CalculateLineEnds(LocalIsolate* isolate,
                                                       Handle<String> src,
                                                       bool include_ending_line);
 

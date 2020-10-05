@@ -8,7 +8,6 @@
 #include "src/base/macros.h"
 #include "src/builtins/accessors.h"
 #include "src/common/globals.h"
-#include "src/execution/local-isolate-wrapper.h"
 #include "src/handles/handles.h"
 #include "src/init/heap-symbols.h"
 #include "src/objects/objects-definitions.h"
@@ -20,8 +19,6 @@ namespace internal {
 
 // Forward declarations.
 enum ElementsKind : uint8_t;
-class OffThreadHeap;
-class OffThreadIsolate;
 template <typename T>
 class Handle;
 class Heap;
@@ -89,6 +86,7 @@ class Symbol;
   V(Map, code_data_container_map, CodeDataContainerMap)                        \
   V(Map, coverage_info_map, CoverageInfoMap)                                   \
   V(Map, descriptor_array_map, DescriptorArrayMap)                             \
+  V(Map, strong_descriptor_array_map, StrongDescriptorArrayMap)                \
   V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Map, global_dictionary_map, GlobalDictionaryMap)                           \
   V(Map, many_closures_cell_map, ManyClosuresCellMap)                          \
@@ -542,11 +540,8 @@ class ReadOnlyRoots {
       static_cast<size_t>(RootIndex::kReadOnlyRootsCount);
 
   V8_INLINE explicit ReadOnlyRoots(Heap* heap);
-  V8_INLINE explicit ReadOnlyRoots(OffThreadHeap* heap);
   V8_INLINE explicit ReadOnlyRoots(Isolate* isolate);
-  V8_INLINE explicit ReadOnlyRoots(OffThreadIsolate* isolate);
-  V8_INLINE explicit ReadOnlyRoots(LocalIsolateWrapper wrapper);
-  V8_INLINE explicit ReadOnlyRoots(LocalHeapWrapper wrapper);
+  V8_INLINE explicit ReadOnlyRoots(LocalIsolate* isolate);
 
 #define ROOT_ACCESSOR(Type, name, CamelName)     \
   V8_INLINE class Type name() const;             \

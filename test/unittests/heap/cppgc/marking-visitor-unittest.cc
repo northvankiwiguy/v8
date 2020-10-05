@@ -23,7 +23,8 @@ namespace {
 class MarkingVisitorTest : public testing::TestWithHeap {
  public:
   MarkingVisitorTest()
-      : marker_(std::make_unique<Marker>(Heap::From(GetHeap())->AsBase())) {}
+      : marker_(MarkerFactory::CreateAndStartMarking<Marker>(
+            *Heap::From(GetHeap()), GetPlatformHandle().get())) {}
   ~MarkingVisitorTest() override { marker_->ClearAllWorklistsForTesting(); }
 
   Marker* GetMarker() { return marker_.get(); }
@@ -47,6 +48,9 @@ class TestMarkingVisitor : public MarkingVisitor {
  public:
   explicit TestMarkingVisitor(Marker* marker)
       : MarkingVisitor(marker->heap(), marker->MarkingStateForTesting()) {}
+  ~TestMarkingVisitor() { marking_state_.Publish(); }
+
+  MarkingState& marking_state() { return marking_state_; }
 };
 
 }  // namespace
@@ -214,7 +218,11 @@ TEST_F(MarkingVisitorTest, MarkMemberInConstruction) {
             Member<GCedWithInConstructionCallback> object(obj);
             visitor.Trace(object);
           });
-  EXPECT_TRUE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_TRUE(visitor.marking_state()
+                  .not_fully_constructed_worklist()
+                  .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 TEST_F(MarkingVisitorTest, MarkMemberMixinInConstruction) {
@@ -226,7 +234,11 @@ TEST_F(MarkingVisitorTest, MarkMemberMixinInConstruction) {
             Member<MixinWithInConstructionCallback> mixin(obj);
             visitor.Trace(mixin);
           });
-  EXPECT_TRUE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_TRUE(visitor.marking_state()
+                  .not_fully_constructed_worklist()
+                  .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 TEST_F(MarkingVisitorTest, DontMarkWeakMemberInConstruction) {
@@ -238,7 +250,11 @@ TEST_F(MarkingVisitorTest, DontMarkWeakMemberInConstruction) {
             WeakMember<GCedWithInConstructionCallback> object(obj);
             visitor.Trace(object);
           });
-  EXPECT_FALSE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_FALSE(visitor.marking_state()
+                   .not_fully_constructed_worklist()
+                   .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 TEST_F(MarkingVisitorTest, DontMarkWeakMemberMixinInConstruction) {
@@ -250,7 +266,11 @@ TEST_F(MarkingVisitorTest, DontMarkWeakMemberMixinInConstruction) {
             WeakMember<MixinWithInConstructionCallback> mixin(obj);
             visitor.Trace(mixin);
           });
-  EXPECT_FALSE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_FALSE(visitor.marking_state()
+                   .not_fully_constructed_worklist()
+                   .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 TEST_F(MarkingVisitorTest, MarkPersistentInConstruction) {
@@ -262,7 +282,11 @@ TEST_F(MarkingVisitorTest, MarkPersistentInConstruction) {
             Persistent<GCedWithInConstructionCallback> object(obj);
             visitor.TraceRootForTesting(object, SourceLocation::Current());
           });
-  EXPECT_TRUE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_TRUE(visitor.marking_state()
+                  .not_fully_constructed_worklist()
+                  .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 TEST_F(MarkingVisitorTest, MarkPersistentMixinInConstruction) {
@@ -274,7 +298,11 @@ TEST_F(MarkingVisitorTest, MarkPersistentMixinInConstruction) {
             Persistent<MixinWithInConstructionCallback> mixin(obj);
             visitor.TraceRootForTesting(mixin, SourceLocation::Current());
           });
-  EXPECT_TRUE(HeapObjectHeader::FromPayload(gced).IsMarked());
+  HeapObjectHeader& header = HeapObjectHeader::FromPayload(gced);
+  EXPECT_TRUE(visitor.marking_state()
+                  .not_fully_constructed_worklist()
+                  .ContainsForTesting(&header));
+  EXPECT_FALSE(header.IsMarked());
 }
 
 }  // namespace internal

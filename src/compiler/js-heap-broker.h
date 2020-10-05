@@ -10,6 +10,7 @@
 #include "src/common/globals.h"
 #include "src/compiler/access-info.h"
 #include "src/compiler/feedback-source.h"
+#include "src/compiler/globals.h"
 #include "src/compiler/processed-feedback.h"
 #include "src/compiler/refs-map.h"
 #include "src/compiler/serializer-hints.h"
@@ -17,6 +18,7 @@
 #include "src/handles/persistent-handles.h"
 #include "src/heap/local-heap.h"
 #include "src/interpreter/bytecode-array-accessor.h"
+#include "src/objects/code-kind.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/objects.h"
@@ -77,13 +79,13 @@ struct PropertyAccessTarget {
 class V8_EXPORT_PRIVATE JSHeapBroker {
  public:
   JSHeapBroker(Isolate* isolate, Zone* broker_zone, bool tracing_enabled,
-               bool is_concurrent_inlining, bool is_native_context_independent);
+               bool is_concurrent_inlining, CodeKind code_kind);
 
   // For use only in tests, sets default values for some arguments. Avoids
   // churn when new flags are added.
   JSHeapBroker(Isolate* isolate, Zone* broker_zone)
       : JSHeapBroker(isolate, broker_zone, FLAG_trace_heap_broker, false,
-                     false) {}
+                     CodeKind::TURBOFAN) {}
 
   ~JSHeapBroker();
 
@@ -101,8 +103,15 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   bool tracing_enabled() const { return tracing_enabled_; }
   bool is_concurrent_inlining() const { return is_concurrent_inlining_; }
   bool is_native_context_independent() const {
-    return is_native_context_independent_;
+    return code_kind_ == CodeKind::NATIVE_CONTEXT_INDEPENDENT;
   }
+  bool generate_full_feedback_collection() const {
+    // NCI code currently collects full feedback.
+    DCHECK_IMPLIES(is_native_context_independent(),
+                   CollectFeedbackInGenericLowering());
+    return is_native_context_independent();
+  }
+  bool is_turboprop() const { return code_kind_ == CodeKind::TURBOPROP; }
 
   enum BrokerMode { kDisabled, kSerializing, kSerialized, kRetired };
   BrokerMode mode() const { return mode_; }
@@ -241,13 +250,13 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
       }
 
       Object obj(address);
-      Address** entry = canonical_handles_->Get(obj);
-      if (*entry == nullptr) {
+      auto find_result = canonical_handles_->FindOrInsert(obj);
+      if (!find_result.already_exists) {
         // Allocate new PersistentHandle if one wasn't created before.
         DCHECK(local_heap_);
-        *entry = local_heap_->NewPersistentHandle(obj).location();
+        *find_result.entry = local_heap_->NewPersistentHandle(obj).location();
       }
-      return Handle<T>(*entry);
+      return Handle<T>(*find_result.entry);
     } else {
       return Handle<T>(object, isolate());
     }
@@ -350,7 +359,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   BrokerMode mode_ = kDisabled;
   bool const tracing_enabled_;
   bool const is_concurrent_inlining_;
-  bool const is_native_context_independent_;
+  CodeKind const code_kind_;
   std::unique_ptr<PersistentHandles> ph_;
   base::Optional<LocalHeap> local_heap_;
   std::unique_ptr<CanonicalHandlesMap> canonical_handles_;
@@ -363,7 +372,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   ZoneUnorderedMap<PropertyAccessTarget, PropertyAccessInfo,
                    PropertyAccessTarget::Hash, PropertyAccessTarget::Equal>
       property_access_infos_;
-  ZoneUnorderedMap<int, MinimorphicLoadPropertyAccessInfo>
+  ZoneUnorderedMap<FeedbackSource, MinimorphicLoadPropertyAccessInfo,
+                   FeedbackSource::Hash, FeedbackSource::Equal>
       minimorphic_property_access_infos_;
 
   ZoneVector<ObjectData*> typed_array_string_tags_;
@@ -439,6 +449,27 @@ class OffHeapBytecodeArray final : public interpreter::AbstractBytecodeArray {
 
  private:
   BytecodeArrayRef array_;
+};
+
+// Scope that unparks the LocalHeap, if:
+//   a) We have a JSHeapBroker,
+//   b) Said JSHeapBroker has a LocalHeap, and
+//   c) Said LocalHeap has been parked.
+// Used, for example, when printing the graph with --trace-turbo with a
+// previously parked LocalHeap.
+class UnparkedScopeIfNeeded {
+ public:
+  explicit UnparkedScopeIfNeeded(JSHeapBroker* broker) {
+    if (broker != nullptr) {
+      LocalHeap* local_heap = broker->local_heap();
+      if (local_heap != nullptr && local_heap->IsParked()) {
+        unparked_scope.emplace(local_heap);
+      }
+    }
+  }
+
+ private:
+  base::Optional<UnparkedScope> unparked_scope;
 };
 
 }  // namespace compiler

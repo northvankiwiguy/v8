@@ -52,7 +52,7 @@ class TestMemoryAllocatorScope;
 
 namespace third_party_heap {
 class Heap;
-}
+}  // namespace third_party_heap
 
 class IncrementalMarking;
 class BackingStore;
@@ -86,7 +86,6 @@ class MemoryReducer;
 class MinorMarkCompactCollector;
 class ObjectIterator;
 class ObjectStats;
-class OffThreadHeap;
 class Page;
 class PagedSpace;
 class ReadOnlyHeap;
@@ -150,10 +149,11 @@ enum class GarbageCollectionReason {
   kTesting = 21,
   kExternalFinalize = 22,
   kGlobalAllocationLimit = 23,
-  kMeasureMemory = 24
+  kMeasureMemory = 24,
+  kBackgroundAllocationFailure = 25,
   // If you add new items here, then update the incremental_marking_reason,
   // mark_compact_reason, and scavenge_reason counters in counters.h.
-  // Also update src/tools/metrics/histograms/histograms.xml in chromium.
+  // Also update src/tools/metrics/histograms/enums.xml in chromium.
 };
 
 enum class YoungGenerationHandling {
@@ -176,6 +176,18 @@ enum class SkipRoot {
   kStack,
   kUnserializable,
   kWeak
+};
+
+class StrongRootsEntry {
+  StrongRootsEntry() = default;
+
+  FullObjectSlot start;
+  FullObjectSlot end;
+
+  StrongRootsEntry* prev;
+  StrongRootsEntry* next;
+
+  friend class Heap;
 };
 
 class AllocationResult {
@@ -655,10 +667,8 @@ class Heap {
   template <FindMementoMode mode>
   inline AllocationMemento FindAllocationMemento(Map map, HeapObject object);
 
-  // Returns false if not able to reserve.
-  bool ReserveSpace(Reservation* reservations, std::vector<Address>* maps);
-
-  void RequestAndWaitForCollection();
+  // Requests collection and blocks until GC is finished.
+  void RequestCollectionBackground();
 
   //
   // Support for the API.
@@ -687,6 +697,8 @@ class Heap {
   GlobalSafepoint* safepoint() { return safepoint_.get(); }
 
   V8_EXPORT_PRIVATE double MonotonicallyIncreasingTimeInMs();
+
+  void VerifyNewSpaceTop();
 
   void RecordStats(HeapStats* stats, bool take_snapshot = false);
 
@@ -757,8 +769,15 @@ class Heap {
   V8_EXPORT_PRIVATE bool ShouldOptimizeForMemoryUsage();
 
   bool HighMemoryPressure() {
-    return memory_pressure_level_ != MemoryPressureLevel::kNone;
+    return memory_pressure_level_.load(std::memory_order_relaxed) !=
+           MemoryPressureLevel::kNone;
   }
+
+  bool CollectionRequested() {
+    return collection_barrier_.CollectionRequested();
+  }
+
+  void CheckCollectionRequested();
 
   void RestoreHeapLimit(size_t heap_limit) {
     // Do not set the limit lower than the live size + some slack.
@@ -867,8 +886,11 @@ class Heap {
   V8_INLINE void SetMessageListeners(TemplateList value);
   V8_INLINE void SetPendingOptimizeForTestBytecode(Object bytecode);
 
-  void RegisterStrongRoots(FullObjectSlot start, FullObjectSlot end);
-  void UnregisterStrongRoots(FullObjectSlot start);
+  StrongRootsEntry* RegisterStrongRoots(FullObjectSlot start,
+                                        FullObjectSlot end);
+  void UnregisterStrongRoots(StrongRootsEntry* entry);
+  void UpdateStrongRoots(StrongRootsEntry* entry, FullObjectSlot start,
+                         FullObjectSlot end);
 
   void SetBuiltinsConstantsTable(FixedArray cache);
   void SetDetachedContexts(WeakArrayList detached_contexts);
@@ -1045,10 +1067,6 @@ class Heap {
   V8_EXPORT_PRIVATE void FinalizeIncrementalMarkingAtomically(
       GarbageCollectionReason gc_reason);
 
-  void RegisterDeserializedObjectsForBlackAllocation(
-      Reservation* reservations, const std::vector<HeapObject>& large_objects,
-      const std::vector<Address>& maps);
-
   IncrementalMarking* incremental_marking() {
     return incremental_marking_.get();
   }
@@ -1148,8 +1166,6 @@ class Heap {
   static inline bool InToPage(Object object);
   static inline bool InToPage(MaybeObject object);
   static inline bool InToPage(HeapObject heap_object);
-
-  V8_EXPORT_PRIVATE static bool InOffThreadSpace(HeapObject heap_object);
 
   // Returns whether the object resides in old space.
   inline bool InOldSpace(Object object);
@@ -1427,8 +1443,10 @@ class Heap {
   // Heap object allocation tracking. ==========================================
   // ===========================================================================
 
-  void AddHeapObjectAllocationTracker(HeapObjectAllocationTracker* tracker);
-  void RemoveHeapObjectAllocationTracker(HeapObjectAllocationTracker* tracker);
+  V8_EXPORT_PRIVATE void AddHeapObjectAllocationTracker(
+      HeapObjectAllocationTracker* tracker);
+  V8_EXPORT_PRIVATE void RemoveHeapObjectAllocationTracker(
+      HeapObjectAllocationTracker* tracker);
   bool has_heap_object_allocation_tracker() const {
     return !allocation_trackers_.empty();
   }
@@ -1558,23 +1576,69 @@ class Heap {
     DISALLOW_COPY_AND_ASSIGN(ExternalStringTable);
   };
 
+  // This class stops and resumes all background threads waiting for GC.
   class CollectionBarrier {
     Heap* heap_;
     base::Mutex mutex_;
     base::ConditionVariable cond_;
-    bool gc_requested_;
-    bool shutdown_requested_;
+
+    enum class RequestState {
+      // Default state, no collection requested and tear down wasn't initated
+      // yet.
+      kDefault,
+
+      // Collection was already requested
+      kCollection,
+
+      // This state is reached after isolate starts to shut down. The main
+      // thread can't perform any GCs anymore, so all allocations need to be
+      // allowed from here on until background thread finishes.
+      kShutdown,
+    };
+
+    // The current state.
+    std::atomic<RequestState> state_;
+
+    void BlockUntilCollected();
+
+    // Request GC by activating stack guards and posting a task to perform the
+    // GC.
+    void ActivateStackGuardAndPostTask();
+
+    // Returns true when state was successfully updated from kDefault to
+    // kCollection.
+    bool FirstCollectionRequest() {
+      RequestState expected = RequestState::kDefault;
+      return state_.compare_exchange_strong(expected,
+                                            RequestState::kCollection);
+    }
+
+    // Sets state back to kDefault - invoked at end of GC.
+    void ClearCollectionRequested() {
+      RequestState old_state =
+          state_.exchange(RequestState::kDefault, std::memory_order_relaxed);
+      CHECK_NE(old_state, RequestState::kShutdown);
+    }
 
    public:
     explicit CollectionBarrier(Heap* heap)
-        : heap_(heap), gc_requested_(false), shutdown_requested_(false) {}
+        : heap_(heap), state_(RequestState::kDefault) {}
 
-    void CollectionPerformed();
+    // Checks whether any background thread requested GC.
+    bool CollectionRequested() {
+      return state_.load(std::memory_order_relaxed) ==
+             RequestState::kCollection;
+    }
+
+    // Resumes threads waiting for collection.
+    void ResumeThreadsAwaitingCollection();
+
+    // Sets current state to kShutdown.
     void ShutdownRequested();
-    void Wait();
-  };
 
-  struct StrongRootsList;
+    // This is the method use by background threads to request and wait for GC.
+    void AwaitCollectionBackground();
+  };
 
   struct StringTypeTable {
     InstanceType type;
@@ -1801,7 +1865,7 @@ class Heap {
   void GarbageCollectionPrologue();
   void GarbageCollectionPrologueInSafepoint();
   void GarbageCollectionEpilogue();
-  void GarbageCollectionEpilogueInSafepoint();
+  void GarbageCollectionEpilogueInSafepoint(GarbageCollector collector);
 
   // Performs a major collection in the whole heap.
   void MarkCompact();
@@ -1888,12 +1952,11 @@ class Heap {
 
   V8_EXPORT_PRIVATE bool CanExpandOldGeneration(size_t size);
   V8_EXPORT_PRIVATE bool CanExpandOldGenerationBackground(size_t size);
+  V8_EXPORT_PRIVATE bool CanPromoteYoungAndExpandOldGeneration(size_t size);
 
   bool ShouldExpandOldGenerationOnSlowAllocation(
       LocalHeap* local_heap = nullptr);
   bool IsRetryOfFailedAllocation(LocalHeap* local_heap);
-
-  void AlwaysAllocateAfterTearDownStarted();
 
   HeapGrowingMode CurrentHeapGrowingMode();
 
@@ -2059,7 +2122,7 @@ class Heap {
   // and reset by a mark-compact garbage collection.
   std::atomic<MemoryPressureLevel> memory_pressure_level_;
 
-  std::vector<std::pair<v8::NearHeapLimitCallback, void*> >
+  std::vector<std::pair<v8::NearHeapLimitCallback, void*>>
       near_heap_limit_callbacks_;
 
   // For keeping track of context disposals.
@@ -2199,9 +2262,14 @@ class Heap {
   std::unique_ptr<ObjectStats> dead_object_stats_;
   std::unique_ptr<ScavengeJob> scavenge_job_;
   std::unique_ptr<AllocationObserver> scavenge_task_observer_;
+  std::unique_ptr<AllocationObserver> stress_concurrent_allocation_observer_;
   std::unique_ptr<LocalEmbedderHeapTracer> local_embedder_heap_tracer_;
   std::unique_ptr<MarkingBarrier> marking_barrier_;
-  StrongRootsList* strong_roots_list_ = nullptr;
+
+  StrongRootsEntry* strong_roots_head_ = nullptr;
+  base::Mutex strong_roots_mutex_;
+
+  bool need_to_remove_stress_concurrent_allocation_observer_ = false;
 
   // This counter is increased before each GC and never reset.
   // To account for the bytes allocated since the last GC, use the
@@ -2308,8 +2376,6 @@ class Heap {
   friend class ScavengeTaskObserver;
   friend class IncrementalMarking;
   friend class IncrementalMarkingJob;
-  friend class OffThreadHeap;
-  friend class OffThreadSpace;
   friend class OldLargeObjectSpace;
   template <typename ConcreteVisitor, typename MarkingState>
   friend class MarkingVisitorBase;
@@ -2324,13 +2390,14 @@ class Heap {
   friend class ReadOnlyRoots;
   friend class Scavenger;
   friend class ScavengerCollector;
+  friend class StressConcurrentAllocationObserver;
   friend class Space;
   friend class Sweeper;
   friend class heap::TestMemoryAllocatorScope;
 
   // The allocator interface.
   friend class Factory;
-  friend class OffThreadFactory;
+  friend class Deserializer;
 
   // The Isolate constructs us.
   friend class Isolate;
@@ -2488,7 +2555,8 @@ class VerifySmisVisitor : public RootVisitor {
 // is done.
 class V8_EXPORT_PRIVATE PagedSpaceIterator {
  public:
-  explicit PagedSpaceIterator(Heap* heap) : heap_(heap), counter_(OLD_SPACE) {}
+  explicit PagedSpaceIterator(Heap* heap)
+      : heap_(heap), counter_(FIRST_GROWABLE_PAGED_SPACE) {}
   PagedSpace* Next();
 
  private:

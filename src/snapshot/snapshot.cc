@@ -7,7 +7,9 @@
 #include "src/snapshot/snapshot.h"
 
 #include "src/base/platform/platform.h"
+#include "src/common/assert-scope.h"
 #include "src/execution/isolate-inl.h"
+#include "src/heap/safepoint.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/code-kind.h"
@@ -251,8 +253,8 @@ void Snapshot::ClearReconstructableDataForSerialization(
       continue;  // Don't clear extensions, they cannot be recompiled.
     }
 
-    // Also, clear out feedback vectors and any optimized code.
-    if (CodeKindIsJSFunction(fun.code().kind())) {
+    // Also, clear out feedback vectors and recompilable code.
+    if (fun.CanDiscardCompiled()) {
       fun.set_code(*BUILTIN_CODE(isolate, CompileLazy));
     }
     if (!fun.raw_feedback_cell().value().IsUndefined()) {
@@ -280,7 +282,7 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
 
   // Test serialization.
   {
-    DisallowHeapAllocation no_gc;
+    DisallowGarbageCollection no_gc;
 
     Snapshot::SerializerFlags flags(
         Snapshot::kAllowUnknownExternalReferencesForTesting |
@@ -315,30 +317,6 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
   Isolate::Delete(new_isolate);
 }
 
-void ProfileDeserialization(
-    const SnapshotData* read_only_snapshot,
-    const SnapshotData* startup_snapshot,
-    const std::vector<SnapshotData*>& context_snapshots) {
-  if (FLAG_profile_deserialization) {
-    int startup_total = 0;
-    PrintF("Deserialization will reserve:\n");
-    for (const auto& reservation : read_only_snapshot->Reservations()) {
-      startup_total += reservation.chunk_size();
-    }
-    for (const auto& reservation : startup_snapshot->Reservations()) {
-      startup_total += reservation.chunk_size();
-    }
-    PrintF("%10d bytes per isolate\n", startup_total);
-    for (size_t i = 0; i < context_snapshots.size(); i++) {
-      int context_total = 0;
-      for (const auto& reservation : context_snapshots[i]->Reservations()) {
-        context_total += reservation.chunk_size();
-      }
-      PrintF("%10d bytes per context #%zu\n", context_total, i);
-    }
-  }
-}
-
 // static
 constexpr Snapshot::SerializerFlags Snapshot::kDefaultSerializerFlags;
 
@@ -347,9 +325,17 @@ v8::StartupData Snapshot::Create(
     Isolate* isolate, std::vector<Context>* contexts,
     const std::vector<SerializeInternalFieldsCallback>&
         embedder_fields_serializers,
-    const DisallowHeapAllocation& no_gc, SerializerFlags flags) {
+    const DisallowGarbageCollection& no_gc, SerializerFlags flags) {
   DCHECK_EQ(contexts->size(), embedder_fields_serializers.size());
   DCHECK_GT(contexts->size(), 0);
+  HandleScope scope(isolate);
+
+  // Enter a safepoint so that the heap is safe to iterate.
+  // TODO(leszeks): This safepoint's scope could be tightened to just string
+  // table iteration, as that iteration relies on there not being any concurrent
+  // threads mutating the string table. But, there's currently no harm in
+  // holding it for the entire snapshot serialization.
+  SafepointScope safepoint(isolate->heap());
 
   ReadOnlySerializer read_only_serializer(isolate, flags);
   read_only_serializer.SerializeReadOnlyRoots();
@@ -395,7 +381,7 @@ v8::StartupData Snapshot::Create(
 
 // static
 v8::StartupData Snapshot::Create(Isolate* isolate, Context default_context,
-                                 const DisallowHeapAllocation& no_gc,
+                                 const DisallowGarbageCollection& no_gc,
                                  SerializerFlags flags) {
   std::vector<Context> contexts{default_context};
   std::vector<SerializeInternalFieldsCallback> callbacks{{}};
@@ -445,9 +431,6 @@ v8::StartupData SnapshotImpl::CreateSnapshotBlob(
     total_length += static_cast<uint32_t>(context_snapshot->RawData().length());
   }
 
-  ProfileDeserialization(read_only_snapshot_in, startup_snapshot_in,
-                         context_snapshots_in);
-
   char* data = new char[total_length];
   // Zero out pre-payload data. Part of that is only used for padding.
   memset(data, 0, SnapshotImpl::StartupSnapshotOffset(num_contexts));
@@ -471,9 +454,8 @@ v8::StartupData SnapshotImpl::CreateSnapshotBlob(
             reinterpret_cast<const char*>(startup_snapshot->RawData().begin()),
             payload_length);
   if (FLAG_profile_deserialization) {
-    PrintF("Snapshot blob consists of:\n%10d bytes in %d chunks for startup\n",
-           payload_length,
-           static_cast<uint32_t>(startup_snapshot_in->Reservations().size()));
+    PrintF("Snapshot blob consists of:\n%10d bytes for startup\n",
+           payload_length);
   }
   payload_offset += payload_length;
 
@@ -501,10 +483,7 @@ v8::StartupData SnapshotImpl::CreateSnapshotBlob(
         reinterpret_cast<const char*>(context_snapshot->RawData().begin()),
         payload_length);
     if (FLAG_profile_deserialization) {
-      PrintF(
-          "%10d bytes in %d chunks for context #%d\n", payload_length,
-          static_cast<uint32_t>(context_snapshots_in[i]->Reservations().size()),
-          i);
+      PrintF("%10d bytes for context #%d\n", payload_length, i);
     }
     payload_offset += payload_length;
   }

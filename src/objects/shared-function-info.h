@@ -19,8 +19,8 @@
 #include "src/objects/struct.h"
 #include "src/roots/roots.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"
-#include "torque-generated/bit-fields-tq.h"
-#include "torque-generated/field-offsets-tq.h"
+#include "torque-generated/bit-fields.h"
+#include "torque-generated/field-offsets.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -304,7 +304,7 @@ class SharedFunctionInfo : public HeapObject {
   //  - a UncompiledDataWithPreparseData for lazy compilation
   //    [HasUncompiledDataWithPreparseData()]
   //  - a WasmExportedFunctionData for Wasm [HasWasmExportedFunctionData()]
-  DECL_ACCESSORS(function_data, Object)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(function_data, Object)
 
   inline bool IsApiFunction() const;
   inline bool is_class_constructor() const;
@@ -407,6 +407,10 @@ class SharedFunctionInfo : public HeapObject {
   // private instance methdos.
   DECL_BOOLEAN_ACCESSORS(class_scope_has_private_brand)
   DECL_BOOLEAN_ACCESSORS(has_static_private_methods_or_accessors)
+
+  // True if this SFI has been (non-OSR) optimized in the past. This is used to
+  // guide native-context-independent codegen.
+  DECL_BOOLEAN_ACCESSORS(has_optimized_at_least_once)
 
   // True if a Code object associated with this SFI has been inserted into the
   // compilation cache. Note that the cache entry may be removed by aging,
@@ -604,7 +608,7 @@ class SharedFunctionInfo : public HeapObject {
   DECL_PRINTER(SharedFunctionInfo)
   DECL_VERIFIER(SharedFunctionInfo)
 #ifdef VERIFY_HEAP
-  void SharedFunctionInfoVerify(OffThreadIsolate* isolate);
+  void SharedFunctionInfoVerify(LocalIsolate* isolate);
 #endif
 #ifdef OBJECT_PRINT
   void PrintSourceCode(std::ostream& os);
@@ -702,7 +706,7 @@ struct SourceCodeOf {
 // the scope is retained.
 class IsCompiledScope {
  public:
-  template <typename LocalIsolate>
+  inline IsCompiledScope(const SharedFunctionInfo shared, Isolate* isolate);
   inline IsCompiledScope(const SharedFunctionInfo shared,
                          LocalIsolate* isolate);
   inline IsCompiledScope() : retain_bytecode_(), is_compiled_(false) {}

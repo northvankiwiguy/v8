@@ -16,19 +16,6 @@
 
 #include "src/base/memory.h"
 
-// TODO(v8:10749): When we've had a chance to collect performance impact,
-// either move towards using _NONINLINE versions everywhere, or revert back to
-// inline use and remove _NONINLINE macros.
-#define OBJECT_CONSTRUCTORS_NONINLINE(Type, ...)   \
- public:                                           \
-  constexpr Type() : __VA_ARGS__() {}              \
-                                                   \
- protected:                                        \
-  template <typename TFieldType, int kFieldOffset> \
-  friend class TaggedField;                        \
-                                                   \
-  V8_EXPORT_PRIVATE explicit Type(Address ptr)
-
 // Since this changes visibility, it should always be last in a class
 // definition.
 #define OBJECT_CONSTRUCTORS(Type, ...)             \
@@ -40,9 +27,6 @@
   friend class TaggedField;                        \
                                                    \
   explicit inline Type(Address ptr)
-
-#define OBJECT_CONSTRUCTORS_IMPL_NONINLINE(Type, Super) \
-  Type::Type(Address ptr) : Super(ptr) { SLOW_DCHECK(Is##Type()); }
 
 #define OBJECT_CONSTRUCTORS_IMPL(Type, Super) \
   inline Type::Type(Address ptr) : Super(ptr) { SLOW_DCHECK(Is##Type()); }
@@ -100,10 +84,6 @@
   inline type name() const;     \
   inline type name(const Isolate* isolate) const;
 
-#define DECL_GETTER_NONINLINE(name, type) \
-  V8_EXPORT_PRIVATE type name() const;    \
-  V8_EXPORT_PRIVATE type name(const Isolate* isolate) const;
-
 #define DEF_GETTER(holder, name, type)                     \
   type holder::name() const {                              \
     const Isolate* isolate = GetIsolateForPtrCompr(*this); \
@@ -116,16 +96,21 @@
   inline void set_##name(type value, \
                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-#define DECL_ACCESSORS_NONINLINE(name, type) \
-  DECL_GETTER_NONINLINE(name, type)          \
-  V8_EXPORT_PRIVATE void set_##name(         \
-      type value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+#define DECL_ACCESSORS_LOAD_TAG(name, type, tag_type) \
+  inline type name(tag_type tag) const;               \
+  inline type name(const Isolate* isolate, tag_type) const;
 
-#define DECL_CAST_NONINLINE(Type)                    \
-  V8_EXPORT_PRIVATE static Type cast(Object object); \
-  inline static Type unchecked_cast(Object object) { \
-    return bit_cast<Type>(object);                   \
-  }
+#define DECL_ACCESSORS_STORE_TAG(name, type, tag_type) \
+  inline void set_##name(type value, tag_type,         \
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+#define DECL_RELAXED_ACCESSORS(name, type)            \
+  DECL_ACCESSORS_LOAD_TAG(name, type, RelaxedLoadTag) \
+  DECL_ACCESSORS_STORE_TAG(name, type, RelaxedStoreTag)
+
+#define DECL_RELEASE_ACQUIRE_ACCESSORS(name, type)    \
+  DECL_ACCESSORS_LOAD_TAG(name, type, AcquireLoadTag) \
+  DECL_ACCESSORS_STORE_TAG(name, type, ReleaseStoreTag)
 
 #define DECL_CAST(Type)                                 \
   V8_INLINE static Type cast(Object object);            \
@@ -187,14 +172,43 @@
 #define ACCESSORS(holder, name, type, offset) \
   ACCESSORS_CHECKED(holder, name, type, offset, true)
 
+#define RELAXED_ACCESSORS_CHECKED2(holder, name, type, offset, get_condition, \
+                                   set_condition)                             \
+  type holder::name(RelaxedLoadTag tag) const {                               \
+    const Isolate* isolate = GetIsolateForPtrCompr(*this);                    \
+    return holder::name(isolate, tag);                                        \
+  }                                                                           \
+  type holder::name(const Isolate* isolate, RelaxedLoadTag) const {           \
+    type value = TaggedField<type, offset>::load(isolate, *this);             \
+    DCHECK(get_condition);                                                    \
+    return value;                                                             \
+  }                                                                           \
+  void holder::set_##name(type value, RelaxedStoreTag,                        \
+                          WriteBarrierMode mode) {                            \
+    DCHECK(set_condition);                                                    \
+    TaggedField<type, offset>::store(*this, value);                           \
+    CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);                    \
+  }
+
+#define RELAXED_ACCESSORS_CHECKED(holder, name, type, offset, condition) \
+  RELAXED_ACCESSORS_CHECKED2(holder, name, type, offset, condition, condition)
+
+#define RELAXED_ACCESSORS(holder, name, type, offset) \
+  RELAXED_ACCESSORS_CHECKED(holder, name, type, offset, true)
+
 #define SYNCHRONIZED_ACCESSORS_CHECKED2(holder, name, type, offset,       \
                                         get_condition, set_condition)     \
-  DEF_GETTER(holder, name, type) {                                        \
+  type holder::name(AcquireLoadTag tag) const {                           \
+    const Isolate* isolate = GetIsolateForPtrCompr(*this);                \
+    return holder::name(isolate, tag);                                    \
+  }                                                                       \
+  type holder::name(const Isolate* isolate, AcquireLoadTag) const {       \
     type value = TaggedField<type, offset>::Acquire_Load(isolate, *this); \
     DCHECK(get_condition);                                                \
     return value;                                                         \
   }                                                                       \
-  void holder::set_##name(type value, WriteBarrierMode mode) {            \
+  void holder::set_##name(type value, ReleaseStoreTag,                    \
+                          WriteBarrierMode mode) {                        \
     DCHECK(set_condition);                                                \
     TaggedField<type, offset>::Release_Store(*this, value);               \
     CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);                \
@@ -512,20 +526,6 @@
   void DeoptimizationData::Set##name(int i, type value) {       \
     set(IndexForEntry(i) + k##name##Offset, value);             \
   }
-
-#define TQ_OBJECT_CONSTRUCTORS_NONINLINE(Type)     \
- public:                                           \
-  constexpr Type() = default;                      \
-                                                   \
- protected:                                        \
-  template <typename TFieldType, int kFieldOffset> \
-  friend class TaggedField;                        \
-                                                   \
-  V8_EXPORT_PRIVATE explicit Type(Address ptr);    \
-  friend class TorqueGenerated##Type<Type, Super>;
-
-#define TQ_OBJECT_CONSTRUCTORS_IMPL_NONINLINE(Type) \
-  Type::Type(Address ptr) : TorqueGenerated##Type<Type, Type::Super>(ptr) {}
 
 #define TQ_OBJECT_CONSTRUCTORS(Type)               \
  public:                                           \

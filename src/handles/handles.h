@@ -21,7 +21,7 @@ namespace internal {
 class HandleScopeImplementer;
 class Isolate;
 class LocalHeap;
-class OffThreadIsolate;
+class LocalIsolate;
 template <typename T>
 class MaybeHandle;
 class Object;
@@ -40,7 +40,7 @@ class HandleBase {
  public:
   V8_INLINE explicit HandleBase(Address* location) : location_(location) {}
   V8_INLINE explicit HandleBase(Address object, Isolate* isolate);
-  V8_INLINE explicit HandleBase(Address object, OffThreadIsolate* isolate);
+  V8_INLINE explicit HandleBase(Address object, LocalIsolate* isolate);
   V8_INLINE explicit HandleBase(Address object, LocalHeap* local_heap);
 
   // Check if this handle refers to the exact same object as the other handle.
@@ -59,6 +59,8 @@ class HandleBase {
   V8_INLINE Address address() const { return bit_cast<Address>(location_); }
 
   // Returns the address to where the raw pointer is stored.
+  // TODO(leszeks): This should probably be a const Address*, to encourage using
+  // PatchValue for modifying the handle's value.
   V8_INLINE Address* location() const {
     SLOW_DCHECK(location_ == nullptr || IsDereferenceAllowed());
     return location_;
@@ -122,7 +124,7 @@ class Handle final : public HandleBase {
   }
 
   V8_INLINE Handle(T object, Isolate* isolate);
-  V8_INLINE Handle(T object, OffThreadIsolate* isolate);
+  V8_INLINE Handle(T object, LocalIsolate* isolate);
   V8_INLINE Handle(T object, LocalHeap* local_heap);
 
   // Allocate a new handle for the object, do not canonicalize.
@@ -153,6 +155,13 @@ class Handle final : public HandleBase {
 
   // Location equality.
   bool equals(Handle<T> other) const { return address() == other.address(); }
+
+  // Patches this Handle's value, in-place, with a new value. All handles with
+  // the same location will see this update.
+  void PatchValue(T new_value) {
+    SLOW_DCHECK(location_ != nullptr && IsDereferenceAllowed());
+    *location_ = new_value.ptr();
+  }
 
   // Provide function object for location equality comparison.
   struct equal_to {
@@ -239,7 +248,7 @@ class HandleScope {
   // Limit for number of handles with --check-handle-count. This is
   // large enough to compile natives and pass unit tests with some
   // slack for future changes to natives.
-  static const int kCheckHandleThreshold = 30 * 1024;
+  static const int kCheckHandleThreshold = 42 * 1024;
 
  private:
   Isolate* isolate_;
@@ -341,16 +350,6 @@ struct HandleScopeData final {
     sealed_level = level = 0;
     canonical_scope = nullptr;
   }
-};
-
-class OffThreadHandleScope {
- public:
-  // Off-thread Handles are allocated in the parse/compile zone, and not
-  // cleared out, so the scope doesn't have to do anything
-  explicit OffThreadHandleScope(OffThreadIsolate* isolate) {}
-
-  template <typename T>
-  inline Handle<T> CloseAndEscape(Handle<T> handle_value);
 };
 
 }  // namespace internal

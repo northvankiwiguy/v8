@@ -3407,7 +3407,7 @@ template <class S, class D>
 void VectorUnpackHigh(void* dst, void* src) {
   D value = 0;
   for (size_t i = 0; i < kSimd128Size / sizeof(D); i++) {
-    value = *(reinterpret_cast<S*>(src) + i + (sizeof(S) / 2));
+    value = *(reinterpret_cast<S*>(src) + i);
     memcpy(reinterpret_cast<D*>(dst) + i, &value, sizeof(D));
   }
 }
@@ -3463,9 +3463,10 @@ EVALUATE(VUPLH) {
 template <class S, class D>
 void VectorUnpackLow(void* dst, void* src) {
   D value = 0;
-  for (size_t i = kSimd128Size / sizeof(D); i > 0; i--) {
-    value = *(reinterpret_cast<S*>(src) + i - 1);
-    memcpy(reinterpret_cast<D*>(dst) + i - 1, &value, sizeof(D));
+  size_t count = kSimd128Size / sizeof(D);
+  for (size_t i = 0; i < count; i++) {
+    value = *(reinterpret_cast<S*>(src) + i + count);
+    memcpy(reinterpret_cast<D*>(dst) + i, &value, sizeof(D));
   }
 }
 
@@ -3741,15 +3742,14 @@ EVALUATE(VPERM) {
   USE(m6);
   for (int i = 0; i < kSimd128Size; i++) {
     int8_t lane_num = get_simd_register_by_lane<int8_t>(r4, i);
+    // Get the five least significant bits.
+    lane_num = (lane_num << 3) >> 3;
     int reg = r2;
     if (lane_num >= kSimd128Size) {
       lane_num = lane_num - kSimd128Size;
       reg = r3;
     }
-    int8_t result = 0;
-    if (lane_num >= 0 && lane_num < kSimd128Size * 2) {
-      result = get_simd_register_by_lane<int8_t>(reg, lane_num);
-    }
+    int8_t result = get_simd_register_by_lane<int8_t>(reg, lane_num);
     set_simd_register_by_lane<int8_t>(r1, i, result);
   }
   return length;

@@ -48,7 +48,7 @@ class ConcurrentSearchThread final : public v8::base::Thread {
       Handle<Map> map(handle->map(), &local_heap);
 
       Handle<DescriptorArray> descriptors(
-          map->synchronized_instance_descriptors(), &local_heap);
+          map->instance_descriptors(kAcquireLoad), &local_heap);
       bool is_background_thread = true;
       InternalIndex const number =
           descriptors->Search(*name_, *map, is_background_thread);
@@ -70,8 +70,8 @@ class ConcurrentSearchThread final : public v8::base::Thread {
 
 // Uses linear search on a flat object, with up to 8 elements.
 TEST(LinearSearchFlatObject) {
+  heap::EnsureFlagLocalHeapsEnabled();
   CcTest::InitializeVM();
-  FLAG_local_heaps = true;
   Isolate* isolate = CcTest::i_isolate();
 
   std::unique_ptr<PersistentHandles> ph = isolate->NewPersistentHandles();
@@ -122,8 +122,8 @@ TEST(LinearSearchFlatObject) {
 
 // Uses linear search on a flat object, which has more than 8 elements.
 TEST(LinearSearchFlatObject_ManyElements) {
+  heap::EnsureFlagLocalHeapsEnabled();
   CcTest::InitializeVM();
-  FLAG_local_heaps = true;
   Isolate* isolate = CcTest::i_isolate();
 
   std::unique_ptr<PersistentHandles> ph = isolate->NewPersistentHandles();

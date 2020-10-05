@@ -6,13 +6,18 @@ found in the LICENSE file. -->
   <link href="./index.css" rel="stylesheet">
 </head>
 <style>
-  #mapDetails {
+  #mapDetails,
+  #filePositionNode {
     overflow-x: scroll;
-    overflow-y: scroll;
-    height: 100px;
+  }
+
+  #mapDetails::-webkit-scrollbar {
+    width: 0;
+    background-color: transparent;
   }
 </style>
 <div class="panel">
   <h4>Map Details</h4>
+  <section id="filePositionNode"></section>
   <section id="mapDetails"></section>
 </div>

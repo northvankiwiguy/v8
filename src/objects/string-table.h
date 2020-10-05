@@ -22,7 +22,10 @@ class StringTableKey {
   virtual ~StringTableKey() = default;
   inline StringTableKey(uint32_t hash_field, int length);
 
-  virtual Handle<String> AsHandle(Isolate* isolate) = 0;
+  // The individual keys will have their own AsHandle, we shouldn't call the
+  // base version.
+  Handle<String> AsHandle(Isolate* isolate) = delete;
+
   uint32_t hash_field() const {
     DCHECK_NE(0, hash_field_);
     return hash_field_;
@@ -52,7 +55,7 @@ class V8_EXPORT_PRIVATE StringTable {
   static constexpr Smi empty_element() { return Smi::FromInt(0); }
   static constexpr Smi deleted_element() { return Smi::FromInt(1); }
 
-  StringTable();
+  explicit StringTable(Isolate* isolate);
   ~StringTable();
 
   int Capacity() const;
@@ -65,8 +68,8 @@ class V8_EXPORT_PRIVATE StringTable {
   // Find string in the string table, using the given key. If the string is not
   // there yet, it is created (by the key) and added. The return value is the
   // string found.
-  template <typename StringTableKey>
-  Handle<String> LookupKey(Isolate* isolate, StringTableKey* key);
+  template <typename StringTableKey, typename LocalIsolate>
+  Handle<String> LookupKey(LocalIsolate* isolate, StringTableKey* key);
 
   // {raw_string} must be a tagged String pointer.
   // Returns a tagged pointer: either a Smi if the string is an array index, an
@@ -84,11 +87,17 @@ class V8_EXPORT_PRIVATE StringTable {
   void NotifyElementsRemoved(int count);
 
  private:
-  void EnsureCapacity(const Isolate* isolate, int additional_elements);
-
   class Data;
-  std::unique_ptr<Data> data_;
-  base::Mutex write_mutex_;
+
+  Data* EnsureCapacity(const Isolate* isolate, int additional_elements);
+
+  std::atomic<Data*> data_;
+  // Write mutex is mutable so that readers of concurrently mutated values (e.g.
+  // NumberOfElements) are allowed to lock it while staying const.
+  mutable base::Mutex write_mutex_;
+#ifdef DEBUG
+  Isolate* isolate_;
+#endif
 };
 
 }  // namespace internal
